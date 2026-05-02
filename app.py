@@ -16,7 +16,7 @@ import math
 import random
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -316,6 +316,107 @@ def display_name_for(db: Dict, username: str) -> str:
     """Return the user's saved display name, falling back to the lookup key."""
     key = normalize_username(username)
     return db["users"].get(key, {}).get("display_name", key)
+
+
+# -----------------------------
+# Persistent sessions ("Remember me")
+# -----------------------------
+
+SESSION_DAYS = 30
+SESSION_COOKIE_NAME = "whiskey_session"
+
+
+def _hash_token(token: str) -> str:
+    """SHA-256 hash of a session token. Only the hash is stored server-side."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def create_session(username: str) -> Optional[str]:
+    """Issue a new session token for a user. Returns the raw token (for the cookie),
+    or None if persistent sessions aren't available (e.g. local JSON dev mode)."""
+    if not _is_supabase_enabled():
+        return None  # JSON-file mode doesn't support persistent sessions
+    sb = _get_supabase_client()
+    raw_token = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
+    try:
+        sb.table("sessions").insert({
+            "token_hash": _hash_token(raw_token),
+            "username": normalize_username(username),
+            "expires_at": expires_at,
+        }).execute()
+        return raw_token
+    except Exception:
+        return None
+
+
+def lookup_session(token: str) -> Optional[str]:
+    """Look up a session token. Returns the username if valid and not expired, else None."""
+    if not token or not _is_supabase_enabled():
+        return None
+    sb = _get_supabase_client()
+    try:
+        result = sb.table("sessions").select("username,expires_at").eq(
+            "token_hash", _hash_token(token)
+        ).execute()
+    except Exception:
+        return None
+    rows = result.data or []
+    if not rows:
+        return None
+    row = rows[0]
+    # Check expiry
+    try:
+        expires = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires:
+            # Expired — clean it up so the table doesn't bloat
+            try:
+                sb.table("sessions").delete().eq("token_hash", _hash_token(token)).execute()
+            except Exception:
+                pass
+            return None
+    except Exception:
+        return None
+    return row["username"]
+
+
+def revoke_session(token: str) -> None:
+    """Delete a single session. Used on normal sign-out."""
+    if not token or not _is_supabase_enabled():
+        return
+    sb = _get_supabase_client()
+    try:
+        sb.table("sessions").delete().eq("token_hash", _hash_token(token)).execute()
+    except Exception:
+        pass
+
+
+def revoke_all_sessions(username: str) -> int:
+    """Delete every session for a user. Returns the number of sessions revoked.
+    Used by 'Sign out from all devices'."""
+    if not _is_supabase_enabled():
+        return 0
+    sb = _get_supabase_client()
+    try:
+        result = sb.table("sessions").delete().eq(
+            "username", normalize_username(username)
+        ).execute()
+        return len(result.data or [])
+    except Exception:
+        return 0
+
+
+def get_cookie_controller():
+    """Lazily build the cookie controller. Returns None if the package isn't installed."""
+    if "_cookie_controller" in st.session_state:
+        return st.session_state._cookie_controller
+    try:
+        from streamlit_cookies_controller import CookieController
+        ctrl = CookieController()
+        st.session_state._cookie_controller = ctrl
+        return ctrl
+    except ImportError:
+        return None
 
 
 def normalize_bottle_record(b: Dict) -> Dict:
@@ -1708,6 +1809,21 @@ db = load_db()
 if "user" not in st.session_state:
     st.session_state.user = None
 
+# Auto-login from a remembered session cookie (if available)
+if st.session_state.user is None:
+    _ctrl = get_cookie_controller()
+    if _ctrl is not None:
+        try:
+            _existing_token = _ctrl.get(SESSION_COOKIE_NAME)
+        except Exception:
+            _existing_token = None
+        if _existing_token:
+            _resolved_user = lookup_session(_existing_token)
+            if _resolved_user and _resolved_user in db["users"]:
+                st.session_state.user = _resolved_user
+                # Also stash the token in session state so sign-out can revoke it
+                st.session_state.session_token = _existing_token
+
 # --- Auth screens ---
 if st.session_state.user is None:
     # --- Hero ---
@@ -1771,6 +1887,9 @@ if st.session_state.user is None:
             key="signup_code",
             placeholder="paste the code your friend sent",
         )
+        remember_signup = st.checkbox(
+            "Keep me signed in for 30 days", value=True, key="signup_remember",
+        )
 
         if st.button("Create my account 🥃", type="primary", use_container_width=True):
             expected_code = st.secrets.get("signup_code", "")
@@ -1791,6 +1910,19 @@ if st.session_state.user is None:
             else:
                 create_user(db, new_u_clean, new_p)
                 st.session_state.user = new_u_key
+                if remember_signup:
+                    _token = create_session(new_u_key)
+                    if _token:
+                        _ctrl = get_cookie_controller()
+                        if _ctrl is not None:
+                            try:
+                                _ctrl.set(
+                                    SESSION_COOKIE_NAME, _token,
+                                    max_age=SESSION_DAYS * 86400,
+                                )
+                                st.session_state.session_token = _token
+                            except Exception:
+                                pass
                 st.toast(f"Welcome, {new_u_clean}! 🥃", icon="🎉")
                 st.rerun()
 
@@ -1809,9 +1941,26 @@ if st.session_state.user is None:
         st.subheader("Welcome back")
         u = st.text_input("Username", key="login_user")
         p = st.text_input("Password", type="password", key="login_pw")
+        remember_login = st.checkbox(
+            "Keep me signed in for 30 days", value=True, key="login_remember",
+        )
         if st.button("Sign in 🥃", type="primary", use_container_width=True):
             if verify_user(db, u, p):
-                st.session_state.user = normalize_username(u)
+                _user_key = normalize_username(u)
+                st.session_state.user = _user_key
+                if remember_login:
+                    _token = create_session(_user_key)
+                    if _token:
+                        _ctrl = get_cookie_controller()
+                        if _ctrl is not None:
+                            try:
+                                _ctrl.set(
+                                    SESSION_COOKIE_NAME, _token,
+                                    max_age=SESSION_DAYS * 86400,
+                                )
+                                st.session_state.session_token = _token
+                            except Exception:
+                                pass
                 st.rerun()
             else:
                 st.error("Wrong username or password.")
@@ -1839,7 +1988,18 @@ header_col, logout_col = st.columns([4, 1])
 header_col.title("🥃 What Should I Pour?")
 header_col.caption(f"Signed in as **{display_name_for(db, current_user)}**")
 if logout_col.button("Sign out"):
+    # Revoke this device's session token + clear cookie
+    _token = st.session_state.get("session_token")
+    if _token:
+        revoke_session(_token)
+    _ctrl = get_cookie_controller()
+    if _ctrl is not None:
+        try:
+            _ctrl.remove(SESSION_COOKIE_NAME)
+        except Exception:
+            pass
     st.session_state.user = None
+    st.session_state.pop("session_token", None)
     st.session_state.pop("identified", None)
     st.rerun()
 
@@ -2965,7 +3125,37 @@ with tab_prefs:
                 st.error("New passwords don't match.")
             else:
                 set_password(db, current_user, cp_new)
-                st.success("Password updated.")
+                # Changing password should also invalidate all "remember me"
+                # tokens for safety — same reason most apps do this.
+                revoke_all_sessions(current_user)
+                _ctrl = get_cookie_controller()
+                if _ctrl is not None:
+                    try:
+                        _ctrl.remove(SESSION_COOKIE_NAME)
+                    except Exception:
+                        pass
+                st.success("Password updated. You've been signed out of all other devices.")
+
+    with st.expander("Sign out from all devices"):
+        st.caption(
+            "Use this if you've lost a phone or signed in somewhere shared. "
+            "It revokes every 'remember me' session for your account, including this one."
+        )
+        if st.button("Sign out from all devices", key="signout_all"):
+            count = revoke_all_sessions(current_user)
+            _ctrl = get_cookie_controller()
+            if _ctrl is not None:
+                try:
+                    _ctrl.remove(SESSION_COOKIE_NAME)
+                except Exception:
+                    pass
+            st.session_state.user = None
+            st.session_state.pop("session_token", None)
+            st.toast(
+                f"Signed out from {count} device{'s' if count != 1 else ''}.",
+                icon="🔒",
+            )
+            st.rerun()
 
 # --- Friends ---
 with tab_friends:
@@ -3495,19 +3685,23 @@ if tab_admin is not None:
                 elif mode == "Generate a temporary password":
                     temp = secrets.token_urlsafe(9)
                     set_password(db, target, temp)
+                    revoke_all_sessions(target)
                     st.success("Password reset. Share this with the user:")
                     st.code(temp, language=None)
                     st.caption(
                         "This temp password is shown once. Copy it now — refreshing "
-                        "the page will not show it again."
+                        "the page will not show it again. The user has also been signed "
+                        "out of all their devices."
                     )
                 else:
                     if len(specific) < 6:
                         st.error("Password must be at least 6 characters.")
                     else:
                         set_password(db, target, specific)
+                        revoke_all_sessions(target)
                         st.success(
-                            f"Password updated for {display_name_for(db, target)}."
+                            f"Password updated for {display_name_for(db, target)}. "
+                            f"They've been signed out of all their devices."
                         )
 
         st.divider()

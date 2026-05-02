@@ -1,0 +1,40 @@
+name: Keep Supabase Alive
+
+# Pings the Supabase database once a day to prevent the free tier from
+# pausing after 7 days of inactivity. The query is a lightweight SELECT
+# that resets the inactivity timer.
+
+on:
+  schedule:
+    # 03:00 UTC every day. Adjust if you prefer a different time.
+    - cron: '0 3 * * *'
+  workflow_dispatch:  # allows manual trigger from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::SUPABASE_URL and SUPABASE_KEY secrets must be set in repo settings."
+            exit 1
+          fi
+          # Hit the REST API with a tiny SELECT. count=exact tells PostgREST
+          # to return the row count without sending the rows themselves.
+          response=$(curl -s -o /tmp/body -w "%{http_code}" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Range: 0-0" \
+            -H "Prefer: count=exact" \
+            "$SUPABASE_URL/rest/v1/app_users?select=username")
+          echo "HTTP status: $response"
+          cat /tmp/body
+          if [ "$response" != "200" ] && [ "$response" != "206" ]; then
+            echo "::error::Unexpected status code from Supabase."
+            exit 1
+          fi
+          echo "Supabase pinged successfully."

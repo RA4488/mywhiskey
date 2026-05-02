@@ -1,17 +1,20 @@
 """
-Whiskey Recommendation App - Streamlit version with photo bottle entry
+Whiskey Recommendation App - Multi-user version
 Run locally:   streamlit run app.py
 Deploy free:   push to GitHub -> share.streamlit.io
 
 Secrets needed (Streamlit Cloud Settings -> Secrets):
-    password = "your-shared-password"
     anthropic_api_key = "sk-ant-..."
+    signup_code = "your-shared-invite-code"   # anyone with this can register
+    admin_username = "you"                     # optional: can manage signup code
 """
 
 import base64
+import hashlib
 import json
 import math
 import random
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -44,30 +47,68 @@ class Preferences:
 
 
 # -----------------------------
-# Persistence
+# Persistence (JSON-backed; swap this layer for SQLite/Supabase later)
 # -----------------------------
+#
+# Data shape:
+# {
+#   "users": {
+#     "username": {
+#       "password_hash": "...",
+#       "salt": "...",
+#       "bottles": [...],
+#       "preferences": {...},
+#       "recent_ids": [...]
+#     }
+#   }
+# }
 
 DATA_FILE = Path("data.json")
 
 
-def load_data() -> Dict:
+def load_db() -> Dict:
     if DATA_FILE.exists():
         with open(DATA_FILE) as f:
             return json.load(f)
-    return {"bottles": [], "preferences": {}, "recent_ids": []}
+    return {"users": {}}
 
 
-def save_data(data: Dict) -> None:
+def save_db(db: Dict) -> None:
     with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(db, f, indent=2)
 
 
-def bottles_from_data(data: Dict) -> List[Bottle]:
-    return [Bottle(**b) for b in data["bottles"]]
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt.encode(), 100_000
+    ).hex()
 
 
-def prefs_from_data(data: Dict) -> Preferences:
-    p = data.get("preferences", {})
+def create_user(db: Dict, username: str, password: str) -> None:
+    salt = secrets.token_hex(16)
+    db["users"][username] = {
+        "password_hash": hash_password(password, salt),
+        "salt": salt,
+        "bottles": [],
+        "preferences": {},
+        "recent_ids": [],
+    }
+    save_db(db)
+
+
+def verify_user(db: Dict, username: str, password: str) -> bool:
+    user = db["users"].get(username)
+    if not user:
+        return False
+    return hash_password(password, user["salt"]) == user["password_hash"]
+
+
+def get_user_bottles(db: Dict, username: str) -> List[Bottle]:
+    return [Bottle(**b) for b in db["users"][username].get("bottles", [])]
+
+
+def get_user_prefs(db: Dict, username: str) -> Preferences:
+    p = db["users"][username].get("preferences", {})
     return Preferences(
         liked_profiles=p.get("liked_profiles", []),
         preferred_proof_min=p.get("preferred_proof_min"),
@@ -76,20 +117,20 @@ def prefs_from_data(data: Dict) -> Preferences:
     )
 
 
+def list_other_users(db: Dict, current_user: str) -> List[str]:
+    return sorted(u for u in db["users"].keys() if u != current_user)
+
+
 # -----------------------------
 # Vision: identify bottle from photo
 # -----------------------------
 
 def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
-    """Send image to Claude and get structured bottle info back."""
     from anthropic import Anthropic
 
     api_key = st.secrets.get("anthropic_api_key")
     if not api_key:
-        raise RuntimeError(
-            "Missing anthropic_api_key in Streamlit secrets. "
-            "Add it under Settings -> Secrets."
-        )
+        raise RuntimeError("Missing anthropic_api_key in Streamlit secrets.")
 
     client = Anthropic(api_key=api_key)
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -101,39 +142,28 @@ def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
         '  type: one of "bourbon", "rye", "scotch", "rum", "other" (string)\n'
         "  proof: proof number if visible or known (number or null)\n"
         "  confidence: your confidence 0-1 that you identified it correctly (number)\n"
-        "  notes: short string explaining what you see, or what you couldn't read\n"
+        "  notes: short string explaining what you see\n"
         "If you cannot identify the bottle at all, return name as empty string."
     )
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=500,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": mime_type,
-                            "data": b64,
-                        },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": b64}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
     )
 
     text = response.content[0].text.strip()
-    # Strip markdown fences if Claude added them
     if text.startswith("```"):
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
         text = text.strip()
-
     return json.loads(text)
 
 
@@ -141,10 +171,7 @@ def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
 # Scoring
 # -----------------------------
 
-FLAVOR_DIMENSIONS = [
-    "oak", "caramel", "vanilla", "spice",
-    "fruit", "sweet", "smoke", "herbal", "chocolate"
-]
+FLAVOR_DIMENSIONS = ["oak", "caramel", "vanilla", "spice", "fruit", "sweet", "smoke", "herbal", "chocolate"]
 
 
 def normalize(vec):
@@ -168,10 +195,7 @@ def cosine_similarity(a, b):
 def flavor_score(bottle, prefs):
     if not prefs.liked_profiles:
         return 0.5
-    return cosine_similarity(
-        notes_to_vector(bottle.tasting_notes),
-        notes_to_vector(prefs.liked_profiles),
-    )
+    return cosine_similarity(notes_to_vector(bottle.tasting_notes), notes_to_vector(prefs.liked_profiles))
 
 
 def proof_score(bottle, prefs):
@@ -179,10 +203,7 @@ def proof_score(bottle, prefs):
         return 0.5
     if prefs.preferred_proof_min <= bottle.proof <= prefs.preferred_proof_max:
         return 1.0
-    distance = min(
-        abs(bottle.proof - prefs.preferred_proof_min),
-        abs(bottle.proof - prefs.preferred_proof_max),
-    )
+    distance = min(abs(bottle.proof - prefs.preferred_proof_min), abs(bottle.proof - prefs.preferred_proof_max))
     return max(0.0, 1.0 - (distance / 50))
 
 
@@ -243,56 +264,94 @@ def recommend_bottles(inventory, prefs, mode, recent_ids, top_n=3):
         scored.append((bottle, total))
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [
-        {"bottle": b, "score": round(s, 3), "reason": build_reason(b, prefs)}
-        for b, s in scored[:top_n]
-    ]
+    return [{"bottle": b, "score": round(s, 3), "reason": build_reason(b, prefs)} for b, s in scored[:top_n]]
 
 
 # -----------------------------
-# UI
+# Auth UI
 # -----------------------------
 
 st.set_page_config(page_title="What Should I Pour?", page_icon="🥃", layout="centered")
 
-PASSWORD = st.secrets.get("password", "letmein")
-if "auth" not in st.session_state:
-    st.session_state.auth = False
-if not st.session_state.auth:
-    pw = st.text_input("Password", type="password")
-    if st.button("Enter"):
-        if pw == PASSWORD:
-            st.session_state.auth = True
-            st.rerun()
-        else:
-            st.error("Wrong password")
+db = load_db()
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if st.session_state.user is None:
+    st.title("🥃 What Should I Pour?")
+
+    auth_tab_login, auth_tab_signup = st.tabs(["Sign in", "Create account"])
+
+    with auth_tab_login:
+        u = st.text_input("Username", key="login_user")
+        p = st.text_input("Password", type="password", key="login_pw")
+        if st.button("Sign in", type="primary"):
+            if verify_user(db, u.strip(), p):
+                st.session_state.user = u.strip()
+                st.rerun()
+            else:
+                st.error("Wrong username or password.")
+
+    with auth_tab_signup:
+        st.caption("You need an invite code to sign up. Ask whoever set this up for you.")
+        new_u = st.text_input("Pick a username", key="signup_user")
+        new_p = st.text_input("Pick a password", type="password", key="signup_pw")
+        new_p2 = st.text_input("Confirm password", type="password", key="signup_pw2")
+        code = st.text_input("Invite code", key="signup_code")
+        if st.button("Create account", type="primary"):
+            expected_code = st.secrets.get("signup_code", "")
+            new_u_clean = new_u.strip()
+            if not new_u_clean or not new_p:
+                st.error("Username and password required.")
+            elif new_p != new_p2:
+                st.error("Passwords don't match.")
+            elif len(new_p) < 6:
+                st.error("Password must be at least 6 characters.")
+            elif new_u_clean in db["users"]:
+                st.error("That username is taken.")
+            elif not expected_code:
+                st.error("Signup is disabled (no invite code configured).")
+            elif code.strip() != expected_code:
+                st.error("Invalid invite code.")
+            else:
+                create_user(db, new_u_clean, new_p)
+                st.session_state.user = new_u_clean
+                st.success(f"Welcome, {new_u_clean}!")
+                st.rerun()
+
     st.stop()
 
-data = load_data()
-inventory = bottles_from_data(data)
-prefs = prefs_from_data(data)
-recent_ids = data.get("recent_ids", [])
 
-st.title("🥃 What Should I Pour?")
+# -----------------------------
+# Logged-in UI
+# -----------------------------
 
-tab_recommend, tab_inventory, tab_add, tab_prefs = st.tabs(
-    ["Recommend", "Inventory", "Add Bottle", "Preferences"]
+current_user = st.session_state.user
+inventory = get_user_bottles(db, current_user)
+prefs = get_user_prefs(db, current_user)
+recent_ids = db["users"][current_user].get("recent_ids", [])
+
+header_col, logout_col = st.columns([4, 1])
+header_col.title("🥃 What Should I Pour?")
+header_col.caption(f"Signed in as **{current_user}**")
+if logout_col.button("Sign out"):
+    st.session_state.user = None
+    st.session_state.pop("identified", None)
+    st.rerun()
+
+tab_recommend, tab_inventory, tab_add, tab_prefs, tab_friends = st.tabs(
+    ["Recommend", "Inventory", "Add Bottle", "Preferences", "Friends"]
 )
 
-# --- Recommend Tab ---
+# --- Recommend ---
 with tab_recommend:
     if not inventory:
         st.info("Add some bottles first.")
     else:
         mode = st.selectbox(
-            "Mode",
-            ["preference", "random", "special", "preservation"],
-            help=(
-                "preference: best match for your taste · "
-                "random: surprise me · "
-                "special: save the good stuff · "
-                "preservation: drink what's getting low"
-            ),
+            "Mode", ["preference", "random", "special", "preservation"],
+            help="preference: match your taste · random: surprise me · special: save the good stuff · preservation: drink what's getting low",
         )
         top_n = st.slider("How many suggestions?", 1, 5, 3)
 
@@ -305,19 +364,18 @@ with tab_recommend:
                     st.caption(f"{b.type} · {b.proof}° proof · {b.fill_percent:.0f}% full")
                     st.write(f"**Why:** {r['reason']}")
                     st.write(f"**Notes:** {', '.join(b.tasting_notes)}")
-                    st.write(f"Score: `{r['score']}`")
                     if st.button("I poured this 🥃", key=f"pour_{b.id}"):
                         recent_ids = ([b.id] + recent_ids)[:10]
-                        for bot in data["bottles"]:
+                        for bot in db["users"][current_user]["bottles"]:
                             if bot["id"] == b.id:
                                 bot["opened"] = True
                                 bot["fill_percent"] = max(0, bot["fill_percent"] - 5)
-                        data["recent_ids"] = recent_ids
-                        save_data(data)
+                        db["users"][current_user]["recent_ids"] = recent_ids
+                        save_db(db)
                         st.success(f"Logged {b.name}. Cheers.")
                         st.rerun()
 
-# --- Inventory Tab ---
+# --- Inventory ---
 with tab_inventory:
     if not inventory:
         st.info("No bottles yet.")
@@ -330,28 +388,44 @@ with tab_inventory:
             with col2:
                 st.write(f"{b.fill_percent:.0f}%")
                 st.caption("open" if b.opened else "sealed")
-            new_fill = st.slider(
-                "Fill %", 0, 100, int(b.fill_percent), key=f"fill_{b.id}"
-            )
+            new_fill = st.slider("Fill %", 0, 100, int(b.fill_percent), key=f"fill_{b.id}")
             cols = st.columns(2)
             if cols[0].button("Update", key=f"upd_{b.id}"):
-                for bot in data["bottles"]:
+                for bot in db["users"][current_user]["bottles"]:
                     if bot["id"] == b.id:
                         bot["fill_percent"] = new_fill
                         bot["opened"] = new_fill < 100
-                save_data(data)
+                save_db(db)
                 st.rerun()
             if cols[1].button("Remove", key=f"del_{b.id}"):
-                data["bottles"] = [x for x in data["bottles"] if x["id"] != b.id]
-                save_data(data)
+                db["users"][current_user]["bottles"] = [
+                    x for x in db["users"][current_user]["bottles"] if x["id"] != b.id
+                ]
+                save_db(db)
                 st.rerun()
 
-# --- Add Bottle Tab ---
+# --- Add Bottle ---
 with tab_add:
     st.write("Take or upload a photo of the bottle, or enter manually.")
 
-    photo = st.camera_input("Take a photo")
-    uploaded = st.file_uploader("...or upload an image", type=["jpg", "jpeg", "png", "webp"])
+    if "camera_open" not in st.session_state:
+        st.session_state.camera_open = False
+
+    col_cam, col_upload = st.columns(2)
+    if col_cam.button(
+        "📷 Close camera" if st.session_state.camera_open else "📷 Use camera",
+        use_container_width=True,
+    ):
+        st.session_state.camera_open = not st.session_state.camera_open
+        st.rerun()
+
+    photo = None
+    if st.session_state.camera_open:
+        photo = st.camera_input("Take a photo")
+
+    uploaded = col_upload.file_uploader(
+        "Upload image", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed"
+    )
 
     image_source = photo or uploaded
 
@@ -362,7 +436,7 @@ with tab_add:
                 result = identify_bottle_from_image(image_source.getvalue(), mime)
                 st.session_state["identified"] = result
             except json.JSONDecodeError:
-                st.error("Claude returned something that wasn't valid JSON. Try another photo or enter manually.")
+                st.error("Claude returned invalid JSON. Try another photo or enter manually.")
             except Exception as e:
                 st.error(f"Couldn't identify bottle: {e}")
 
@@ -373,9 +447,9 @@ with tab_add:
         if conf >= 0.7:
             st.success(f"Identified with {int(conf * 100)}% confidence — review and save.")
         elif conf >= 0.4:
-            st.warning(f"Best guess ({int(conf * 100)}% confidence) — please verify the details.")
+            st.warning(f"Best guess ({int(conf * 100)}% confidence) — verify the details.")
         else:
-            st.error(f"Low confidence ({int(conf * 100)}%) — most fields may be wrong, edit carefully.")
+            st.error(f"Low confidence ({int(conf * 100)}%) — most fields may be wrong.")
         if identified.get("notes"):
             st.caption(f"_{identified['notes']}_")
 
@@ -392,8 +466,7 @@ with tab_add:
     default_proof = identified.get("proof") or 90.0
     proof = st.number_input("Proof", 80.0, 160.0, float(default_proof), step=0.1)
     notes_raw = st.text_input(
-        "Tasting notes (comma-separated)",
-        placeholder="caramel, vanilla, oak",
+        "Tasting notes (comma-separated)", placeholder="caramel, vanilla, oak",
         help="You'll get better recommendations if you fill these in.",
     )
     fill = st.slider("Fill %", 0, 100, 100)
@@ -405,8 +478,8 @@ with tab_add:
         if not name.strip():
             st.error("Name required.")
         else:
-            new_id = f"b_{len(data['bottles']) + 1}_{int(random.random() * 10000)}"
-            data["bottles"].append({
+            new_id = f"b_{int(random.random() * 100000)}"
+            db["users"][current_user]["bottles"].append({
                 "id": new_id,
                 "name": name.strip(),
                 "type": btype,
@@ -416,7 +489,7 @@ with tab_add:
                 "opened": opened,
                 "store_pick": store_pick,
             })
-            save_data(data)
+            save_db(db)
             st.session_state.pop("identified", None)
             st.success(f"Added {name}.")
             st.rerun()
@@ -425,13 +498,12 @@ with tab_add:
         st.session_state.pop("identified", None)
         st.rerun()
 
-# --- Preferences Tab ---
+# --- Preferences ---
 with tab_prefs:
     st.write("These shape the recommendations.")
     profiles_raw = st.text_input(
         "Liked flavor profiles (comma-separated)",
-        value=", ".join(prefs.liked_profiles),
-        placeholder="caramel, oak, spice",
+        value=", ".join(prefs.liked_profiles), placeholder="caramel, oak, spice",
     )
     col1, col2 = st.columns(2)
     pmin = col1.number_input(
@@ -444,12 +516,35 @@ with tab_prefs:
     )
 
     if st.button("Save preferences", type="primary"):
-        data["preferences"] = {
+        db["users"][current_user]["preferences"] = {
             "liked_profiles": [p.strip() for p in profiles_raw.split(",") if p.strip()],
             "preferred_proof_min": pmin,
             "preferred_proof_max": pmax,
             "favorite_bottles": prefs.favorite_bottles,
         }
-        save_data(data)
+        save_db(db)
         st.success("Saved.")
         st.rerun()
+
+# --- Friends (read-only view of other users' inventories) ---
+with tab_friends:
+    others = list_other_users(db, current_user)
+    if not others:
+        st.info("No other users yet. Share your invite code to get friends on board.")
+    else:
+        friend = st.selectbox("View friend's inventory", options=[""] + others)
+        if friend:
+            friend_bottles = get_user_bottles(db, friend)
+            if not friend_bottles:
+                st.caption(f"{friend} hasn't added any bottles yet.")
+            else:
+                st.caption(f"{friend}'s shelf — read only")
+                for b in friend_bottles:
+                    with st.container(border=True):
+                        st.write(f"**{b.name}**")
+                        st.caption(
+                            f"{b.type} · {b.proof}° · {b.fill_percent:.0f}% full · "
+                            f"{'open' if b.opened else 'sealed'}"
+                        )
+                        if b.tasting_notes:
+                            st.caption(f"Notes: {', '.join(b.tasting_notes)}")

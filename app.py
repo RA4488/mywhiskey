@@ -52,31 +52,199 @@ class Preferences:
 
 
 # -----------------------------
-# Persistence (JSON; swap layer for SQLite/Supabase later)
+# -----------------------------
+# Persistence — Supabase (with JSON fallback for local dev)
 # -----------------------------
 
 DATA_FILE = Path("data.json")
 
 
-def load_db() -> Dict:
+def _get_supabase_client():
+    """Lazily build a Supabase client from Streamlit secrets. Returns None if not configured."""
+    url = st.secrets.get("supabase_url")
+    key = st.secrets.get("supabase_key")
+    if not url or not key:
+        return None
+    # Cache per-session so we don't rebuild on every helper call
+    if "_supabase_client" not in st.session_state:
+        from supabase import create_client
+        st.session_state._supabase_client = create_client(url, key)
+    return st.session_state._supabase_client
+
+
+def _is_supabase_enabled() -> bool:
+    return _get_supabase_client() is not None
+
+
+def _bottle_row_to_dict(row: Dict) -> Dict:
+    """Convert a Supabase bottle row into the in-memory dict shape used by the app."""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "type": row["type"],
+        "proof": row.get("proof"),
+        "world_tasting_notes": row.get("world_tasting_notes") or [],
+        "my_tasting_notes": row.get("my_tasting_notes") or [],
+        "fill_percent": float(row.get("fill_percent", 100)),
+        "sealed": bool(row.get("sealed", True)),
+        "quantity": int(row.get("quantity", 1)),
+        "private_pick": bool(row.get("private_pick", False)),
+        "pick_group": row.get("pick_group", "") or "",
+        "size_ml": int(row.get("size_ml", 750)),
+    }
+
+
+def _bottle_dict_to_row(b: Dict, owner: str) -> Dict:
+    return {
+        "id": b["id"],
+        "owner": owner,
+        "name": b["name"],
+        "type": b["type"],
+        "proof": b.get("proof"),
+        "world_tasting_notes": b.get("world_tasting_notes", []),
+        "my_tasting_notes": b.get("my_tasting_notes", []),
+        "fill_percent": float(b.get("fill_percent", 100)),
+        "sealed": bool(b.get("sealed", True)),
+        "quantity": int(b.get("quantity", 1)),
+        "private_pick": bool(b.get("private_pick", False)),
+        "pick_group": b.get("pick_group", "") or "",
+        "size_ml": int(b.get("size_ml", 750)),
+    }
+
+
+def _trade_row_to_dict(row: Dict) -> Dict:
+    return {
+        "id": row["id"],
+        "from_user": row["from_user"],
+        "to_user": row["to_user"],
+        "status": row["status"],
+        "offered": row.get("offered") or [],
+        "requested": row.get("requested") or [],
+        "message": row.get("message", "") or "",
+        "counter_to_id": row.get("counter_to_id"),
+        "from_shipped": bool(row.get("from_shipped", False)),
+        "from_received": bool(row.get("from_received", False)),
+        "to_shipped": bool(row.get("to_shipped", False)),
+        "to_received": bool(row.get("to_received", False)),
+        "history": row.get("history") or [],
+        "created_at": row.get("created_at") or "",
+        "updated_at": row.get("updated_at") or "",
+    }
+
+
+def _trade_dict_to_row(t: Dict) -> Dict:
+    """Strip server-managed columns; the rest map 1:1."""
+    out = {k: v for k, v in t.items() if k not in ("created_at",)}
+    # updated_at: let our code drive it (we already set it on every state change)
+    return out
+
+
+def _load_from_supabase() -> Dict:
+    sb = _get_supabase_client()
+    db = {"users": {}, "trades": []}
+
+    # Users
+    user_rows = sb.table("users").select("*").execute().data or []
+    for u in user_rows:
+        db["users"][u["username"]] = {
+            "display_name": u.get("display_name", u["username"]),
+            "password_hash": u["password_hash"],
+            "salt": u["salt"],
+            "preferences": u.get("preferences") or {},
+            "recent_ids": u.get("recent_ids") or [],
+            "pour_log": u.get("pour_log") or [],
+            "bottles": [],
+        }
+
+    # Bottles
+    bottle_rows = sb.table("bottles").select("*").execute().data or []
+    for row in bottle_rows:
+        owner = row.get("owner")
+        if owner in db["users"]:
+            db["users"][owner]["bottles"].append(_bottle_row_to_dict(row))
+
+    # Trades
+    trade_rows = sb.table("trades").select("*").execute().data or []
+    db["trades"] = [_trade_row_to_dict(r) for r in trade_rows]
+
+    return db
+
+
+def _save_to_supabase(db: Dict) -> None:
+    """Upsert users + bottles + trades. Deletes removed bottles by syncing per-user lists."""
+    sb = _get_supabase_client()
+
+    # ---- Users ----
+    user_payload = []
+    for username, info in db["users"].items():
+        user_payload.append({
+            "username": username,
+            "display_name": info.get("display_name", username),
+            "password_hash": info["password_hash"],
+            "salt": info["salt"],
+            "preferences": info.get("preferences") or {},
+            "recent_ids": info.get("recent_ids") or [],
+            "pour_log": info.get("pour_log") or [],
+        })
+    if user_payload:
+        sb.table("users").upsert(user_payload, on_conflict="username").execute()
+
+    # ---- Bottles ----
+    # Compute the full set of bottle IDs that should exist across all users,
+    # delete any DB rows not in that set, then upsert all current bottles.
+    all_current_bottles = []
+    all_current_ids = set()
+    for username, info in db["users"].items():
+        for b in info.get("bottles", []):
+            all_current_bottles.append(_bottle_dict_to_row(b, username))
+            all_current_ids.add(b["id"])
+
+    existing = sb.table("bottles").select("id").execute().data or []
+    to_delete = [r["id"] for r in existing if r["id"] not in all_current_ids]
+    if to_delete:
+        sb.table("bottles").delete().in_("id", to_delete).execute()
+    if all_current_bottles:
+        sb.table("bottles").upsert(all_current_bottles, on_conflict="id").execute()
+
+    # ---- Trades ----
+    trades = db.get("trades", [])
+    if trades:
+        payload = [_trade_dict_to_row(t) for t in trades]
+        sb.table("trades").upsert(payload, on_conflict="id").execute()
+
+
+def _load_from_json() -> Dict:
+    """Original JSON-file loader, kept for local dev / fallback."""
     if not DATA_FILE.exists():
-        return {"users": {}}
+        return {"users": {}, "trades": []}
     try:
         with open(DATA_FILE) as f:
             db = json.load(f)
     except (json.JSONDecodeError, OSError):
-        return {"users": {}}
+        return {"users": {}, "trades": []}
     if "users" not in db or not isinstance(db.get("users"), dict):
         db = {"users": {}}
+    db.setdefault("trades", [])
+    return db
 
-    # One-time migration: lowercase existing usernames, preserving original
-    # capitalization as display_name. Strips whitespace from both keys and
-    # display names. Skips any collision (first one wins).
+
+def _save_to_json(db: Dict) -> None:
+    with open(DATA_FILE, "w") as f:
+        json.dump(db, f, indent=2)
+
+
+def load_db() -> Dict:
+    if _is_supabase_enabled():
+        db = _load_from_supabase()
+    else:
+        db = _load_from_json()
+
+    # One-time username normalization: lowercase keys, preserve original
+    # capitalization as display_name. Skips any collision (first one wins).
     migrated = False
     new_users = {}
     for original_key, info in db["users"].items():
         new_key = original_key.strip().lower()
-        # Backfill or clean up display_name
         existing_display = info.get("display_name", original_key)
         cleaned_display = existing_display.strip()
         if "display_name" not in info or cleaned_display != existing_display:
@@ -90,15 +258,15 @@ def load_db() -> Dict:
         db["users"] = new_users
         save_db(db)
 
-    # Ensure top-level collections exist
     db.setdefault("trades", [])
-
     return db
 
 
 def save_db(db: Dict) -> None:
-    with open(DATA_FILE, "w") as f:
-        json.dump(db, f, indent=2)
+    if _is_supabase_enabled():
+        _save_to_supabase(db)
+    else:
+        _save_to_json(db)
 
 
 def hash_password(password: str, salt: str) -> str:

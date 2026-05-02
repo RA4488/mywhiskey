@@ -6,6 +6,7 @@ Deploy free:   push to GitHub -> share.streamlit.io
 Secrets needed (Streamlit Cloud Settings -> Secrets):
     anthropic_api_key = "sk-ant-..."
     signup_code = "your-shared-invite-code"
+    admin_username = "your-username"   # gets the Admin tab for password resets
 """
 
 import base64
@@ -65,6 +66,28 @@ def load_db() -> Dict:
         return {"users": {}}
     if "users" not in db or not isinstance(db.get("users"), dict):
         db = {"users": {}}
+
+    # One-time migration: lowercase existing usernames, preserving original
+    # capitalization as display_name. Strips whitespace from both keys and
+    # display names. Skips any collision (first one wins).
+    migrated = False
+    new_users = {}
+    for original_key, info in db["users"].items():
+        new_key = original_key.strip().lower()
+        # Backfill or clean up display_name
+        existing_display = info.get("display_name", original_key)
+        cleaned_display = existing_display.strip()
+        if "display_name" not in info or cleaned_display != existing_display:
+            info["display_name"] = cleaned_display
+            migrated = True
+        if new_key not in new_users:
+            new_users[new_key] = info
+            if new_key != original_key:
+                migrated = True
+    if migrated:
+        db["users"] = new_users
+        save_db(db)
+
     return db
 
 
@@ -77,9 +100,16 @@ def hash_password(password: str, salt: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000).hex()
 
 
+def normalize_username(username: str) -> str:
+    """Usernames are stored and compared in lowercase, trimmed."""
+    return username.strip().lower()
+
+
 def create_user(db: Dict, username: str, password: str) -> None:
     salt = secrets.token_hex(16)
-    db["users"][username] = {
+    key = normalize_username(username)
+    db["users"][key] = {
+        "display_name": username.strip(),
         "password_hash": hash_password(password, salt),
         "salt": salt,
         "bottles": [],
@@ -90,10 +120,28 @@ def create_user(db: Dict, username: str, password: str) -> None:
 
 
 def verify_user(db: Dict, username: str, password: str) -> bool:
-    user = db["users"].get(username)
+    user = db["users"].get(normalize_username(username))
     if not user:
         return False
     return hash_password(password, user["salt"]) == user["password_hash"]
+
+
+def set_password(db: Dict, username: str, new_password: str) -> bool:
+    """Reset a user's password. Returns True if user exists, False otherwise."""
+    user = db["users"].get(normalize_username(username))
+    if not user:
+        return False
+    new_salt = secrets.token_hex(16)
+    user["salt"] = new_salt
+    user["password_hash"] = hash_password(new_password, new_salt)
+    save_db(db)
+    return True
+
+
+def display_name_for(db: Dict, username: str) -> str:
+    """Return the user's saved display name, falling back to the lookup key."""
+    key = normalize_username(username)
+    return db["users"].get(key, {}).get("display_name", key)
 
 
 def normalize_bottle_record(b: Dict) -> Dict:
@@ -116,7 +164,8 @@ def normalize_bottle_record(b: Dict) -> Dict:
 
 
 def get_user_bottles(db: Dict, username: str) -> List[Bottle]:
-    raw = db["users"][username].get("bottles", [])
+    key = normalize_username(username)
+    raw = db["users"][key].get("bottles", [])
     bottles = []
     for r in raw:
         nb = normalize_bottle_record(r)
@@ -137,7 +186,7 @@ def get_user_bottles(db: Dict, username: str) -> List[Bottle]:
 
 
 def get_user_prefs(db: Dict, username: str) -> Preferences:
-    p = db["users"][username].get("preferences", {})
+    p = db["users"][normalize_username(username)].get("preferences", {})
     return Preferences(
         liked_profiles=p.get("liked_profiles", []),
         preferred_proof_min=p.get("preferred_proof_min"),
@@ -147,7 +196,13 @@ def get_user_prefs(db: Dict, username: str) -> Preferences:
 
 
 def list_other_users(db: Dict, current_user: str) -> List[str]:
-    return sorted(u for u in db["users"].keys() if u != current_user)
+    """Return display names of users other than the current one, sorted."""
+    current_key = normalize_username(current_user)
+    return sorted(
+        info.get("display_name", key)
+        for key, info in db["users"].items()
+        if key != current_key
+    )
 
 
 # -----------------------------
@@ -364,8 +419,8 @@ if st.session_state.user is None:
         u = st.text_input("Username", key="login_user")
         p = st.text_input("Password", type="password", key="login_pw")
         if st.button("Sign in", type="primary"):
-            if verify_user(db, u.strip(), p):
-                st.session_state.user = u.strip()
+            if verify_user(db, u, p):
+                st.session_state.user = normalize_username(u)
                 st.rerun()
             else:
                 st.error("Wrong username or password.")
@@ -379,13 +434,14 @@ if st.session_state.user is None:
         if st.button("Create account", type="primary"):
             expected_code = st.secrets.get("signup_code", "")
             new_u_clean = new_u.strip()
+            new_u_key = normalize_username(new_u_clean)
             if not new_u_clean or not new_p:
                 st.error("Username and password required.")
             elif new_p != new_p2:
                 st.error("Passwords don't match.")
             elif len(new_p) < 6:
                 st.error("Password must be at least 6 characters.")
-            elif new_u_clean in db["users"]:
+            elif new_u_key in db["users"]:
                 st.error("That username is taken.")
             elif not expected_code:
                 st.error("Signup is disabled (no invite code configured).")
@@ -393,7 +449,7 @@ if st.session_state.user is None:
                 st.error("Invalid invite code.")
             else:
                 create_user(db, new_u_clean, new_p)
-                st.session_state.user = new_u_clean
+                st.session_state.user = new_u_key
                 st.success(f"Welcome, {new_u_clean}!")
                 st.rerun()
 
@@ -407,15 +463,26 @@ recent_ids = db["users"][current_user].get("recent_ids", [])
 
 header_col, logout_col = st.columns([4, 1])
 header_col.title("🥃 What Should I Pour?")
-header_col.caption(f"Signed in as **{current_user}**")
+header_col.caption(f"Signed in as **{display_name_for(db, current_user)}**")
 if logout_col.button("Sign out"):
     st.session_state.user = None
     st.session_state.pop("identified", None)
     st.rerun()
 
-tab_recommend, tab_inventory, tab_add, tab_prefs, tab_friends = st.tabs(
-    ["Recommend", "Inventory", "Add Bottle", "Preferences", "Friends"]
-)
+admin_username = normalize_username(st.secrets.get("admin_username", ""))
+is_admin = bool(admin_username) and current_user == admin_username
+
+tab_labels = ["Recommend", "Inventory", "Add Bottle", "Preferences", "Friends"]
+if is_admin:
+    tab_labels.append("Admin")
+
+tabs = st.tabs(tab_labels)
+tab_recommend = tabs[0]
+tab_inventory = tabs[1]
+tab_add = tabs[2]
+tab_prefs = tabs[3]
+tab_friends = tabs[4]
+tab_admin = tabs[5] if is_admin else None
 
 # --- Recommend ---
 with tab_recommend:
@@ -710,6 +777,22 @@ with tab_prefs:
         st.success("Saved.")
         st.rerun()
 
+    st.divider()
+    with st.expander("Change my password"):
+        cp_current = st.text_input("Current password", type="password", key="cp_current")
+        cp_new = st.text_input("New password", type="password", key="cp_new")
+        cp_confirm = st.text_input("Confirm new password", type="password", key="cp_confirm")
+        if st.button("Update password"):
+            if not verify_user(db, current_user, cp_current):
+                st.error("Current password is incorrect.")
+            elif len(cp_new) < 6:
+                st.error("New password must be at least 6 characters.")
+            elif cp_new != cp_confirm:
+                st.error("New passwords don't match.")
+            else:
+                set_password(db, current_user, cp_new)
+                st.success("Password updated.")
+
 # --- Friends ---
 with tab_friends:
     others = list_other_users(db, current_user)
@@ -737,3 +820,65 @@ with tab_friends:
                             st.caption(f"Their notes: {', '.join(b.my_tasting_notes)}")
                         elif b.world_tasting_notes:
                             st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+
+# --- Admin (only visible to admin user) ---
+if tab_admin is not None:
+    with tab_admin:
+        st.write("**Admin tools** — visible only to you.")
+        st.caption(
+            "Use this when a friend forgets their password. Generate a temp "
+            "password, share it with them, and tell them to change it from "
+            "Preferences → Change my password after signing in."
+        )
+        st.divider()
+
+        all_users = sorted(db["users"].keys())
+        target = st.selectbox(
+            "Reset password for user",
+            options=[""] + all_users,
+            format_func=lambda k: display_name_for(db, k) if k else "— pick a user —",
+        )
+
+        if target:
+            st.caption(f"Selected: **{display_name_for(db, target)}**")
+
+            mode = st.radio(
+                "Password",
+                ["Generate a temporary password", "Set a specific password"],
+                horizontal=True,
+            )
+
+            specific = ""
+            if mode == "Set a specific password":
+                specific = st.text_input(
+                    "New password (at least 6 chars)",
+                    type="password",
+                    key="admin_pw",
+                )
+
+            if st.button("Reset password", type="primary"):
+                if target == current_user:
+                    st.error(
+                        "Use Preferences → Change my password to change your own. "
+                        "Resetting yourself here is blocked to avoid mistakes."
+                    )
+                elif mode == "Generate a temporary password":
+                    temp = secrets.token_urlsafe(9)
+                    set_password(db, target, temp)
+                    st.success("Password reset. Share this with the user:")
+                    st.code(temp, language=None)
+                    st.caption(
+                        "This temp password is shown once. Copy it now — refreshing "
+                        "the page will not show it again."
+                    )
+                else:
+                    if len(specific) < 6:
+                        st.error("Password must be at least 6 characters.")
+                    else:
+                        set_password(db, target, specific)
+                        st.success(
+                            f"Password updated for {display_name_for(db, target)}."
+                        )
+
+        st.divider()
+        st.caption(f"Total users: **{len(all_users)}**")

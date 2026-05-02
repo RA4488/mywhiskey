@@ -1,5 +1,5 @@
 """
-Whiskey Recommendation App - Multi-user with rear camera default
+Whiskey Recommendation App - Multi-user, expanded bottle metadata
 Run locally:   streamlit run app.py
 Deploy free:   push to GitHub -> share.streamlit.io
 
@@ -31,10 +31,13 @@ class Bottle:
     name: str
     type: str
     proof: Optional[float]
-    tasting_notes: List[str]
+    world_tasting_notes: List[str]
+    my_tasting_notes: List[str]
     fill_percent: float
-    opened: bool
-    store_pick: Optional[bool] = False
+    sealed: bool
+    quantity: int
+    private_pick: bool = False
+    pick_group: str = ""
 
 
 @dataclass
@@ -46,7 +49,7 @@ class Preferences:
 
 
 # -----------------------------
-# Persistence (JSON; swap this layer for SQLite/Supabase later)
+# Persistence (JSON; swap layer for SQLite/Supabase later)
 # -----------------------------
 
 DATA_FILE = Path("data.json")
@@ -93,8 +96,44 @@ def verify_user(db: Dict, username: str, password: str) -> bool:
     return hash_password(password, user["salt"]) == user["password_hash"]
 
 
+def normalize_bottle_record(b: Dict) -> Dict:
+    """Backfill fields on bottles created under older schemas so the UI doesn't crash."""
+    b.setdefault("quantity", 1)
+    b.setdefault("private_pick", b.get("store_pick", False))
+    b.setdefault("pick_group", "")
+    # Notes: old schema used "tasting_notes" for everything
+    if "world_tasting_notes" not in b and "my_tasting_notes" not in b:
+        legacy = b.get("tasting_notes", [])
+        b["world_tasting_notes"] = []
+        b["my_tasting_notes"] = legacy if isinstance(legacy, list) else []
+    b.setdefault("world_tasting_notes", [])
+    b.setdefault("my_tasting_notes", [])
+    # Sealed is the inverse of "opened" in the old schema
+    if "sealed" not in b:
+        b["sealed"] = not b.get("opened", False)
+    b.setdefault("fill_percent", 100.0)
+    return b
+
+
 def get_user_bottles(db: Dict, username: str) -> List[Bottle]:
-    return [Bottle(**b) for b in db["users"][username].get("bottles", [])]
+    raw = db["users"][username].get("bottles", [])
+    bottles = []
+    for r in raw:
+        nb = normalize_bottle_record(r)
+        bottles.append(Bottle(
+            id=nb["id"],
+            name=nb["name"],
+            type=nb["type"],
+            proof=nb.get("proof"),
+            world_tasting_notes=nb["world_tasting_notes"],
+            my_tasting_notes=nb["my_tasting_notes"],
+            fill_percent=nb["fill_percent"],
+            sealed=nb["sealed"],
+            quantity=nb["quantity"],
+            private_pick=nb["private_pick"],
+            pick_group=nb["pick_group"],
+        ))
+    return bottles
 
 
 def get_user_prefs(db: Dict, username: str) -> Preferences:
@@ -131,14 +170,27 @@ def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
         "  name: full bottle name as printed (string)\n"
         '  type: one of "bourbon", "rye", "scotch", "rum", "other" (string)\n'
         "  proof: proof number if visible or known (number or null)\n"
-        "  confidence: your confidence 0-1 that you identified it correctly (number)\n"
+        "  is_sealed: true if the bottle appears unopened (intact tax strip, foil, "
+        "capsule, or neck wrap visible and undamaged); false if opened (broken seal, "
+        "missing capsule, visible cork or stopper exposed); null if you cannot tell.\n"
+        "  is_private_pick: true if the label or any sticker indicates a private barrel "
+        "selection, store pick, single barrel selection for a group, or similar (look for "
+        '"selected for", "private selection", "barrel pick", "store pick", group/store '
+        "names on a sticker or label addition); false otherwise.\n"
+        "  pick_group: if is_private_pick is true and you can read the group/store name, "
+        "return it as a string; otherwise empty string.\n"
+        "  tasting_notes: array of 4-8 short tasting note keywords commonly associated "
+        "with this bottle if you recognize it (e.g., [\"caramel\", \"oak\", \"vanilla\", "
+        '"baking spice"]). Use lowercase single words or short phrases. Empty array if you '
+        "don't recognize the specific bottle.\n"
+        "  confidence: your confidence 0-1 that you identified the bottle correctly (number)\n"
         "  notes: short string explaining what you see\n"
         "If you cannot identify the bottle at all, return name as empty string."
     )
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=500,
+        max_tokens=800,
         messages=[{
             "role": "user",
             "content": [
@@ -169,13 +221,21 @@ def normalize(vec):
     return [v / norm for v in vec] if norm else vec
 
 
-def notes_to_vector(notes):
+def notes_to_vector(notes, weight=1.0):
     vector = [0.0] * len(FLAVOR_DIMENSIONS)
     for note in notes:
         for i, dim in enumerate(FLAVOR_DIMENSIONS):
             if dim in note.lower():
-                vector[i] += 1.0
-    return normalize(vector)
+                vector[i] += weight
+    return vector
+
+
+def combined_bottle_vector(bottle: Bottle) -> List[float]:
+    """Combine world + my notes; my notes weighted 2x when present."""
+    world_vec = notes_to_vector(bottle.world_tasting_notes, weight=1.0)
+    my_vec = notes_to_vector(bottle.my_tasting_notes, weight=2.0)
+    combined = [w + m for w, m in zip(world_vec, my_vec)]
+    return normalize(combined)
 
 
 def cosine_similarity(a, b):
@@ -185,7 +245,11 @@ def cosine_similarity(a, b):
 def flavor_score(bottle, prefs):
     if not prefs.liked_profiles:
         return 0.5
-    return cosine_similarity(notes_to_vector(bottle.tasting_notes), notes_to_vector(prefs.liked_profiles))
+    bottle_vec = combined_bottle_vector(bottle)
+    pref_vec = normalize(notes_to_vector(prefs.liked_profiles))
+    if all(v == 0 for v in bottle_vec):
+        return 0.5
+    return cosine_similarity(bottle_vec, pref_vec)
 
 
 def proof_score(bottle, prefs):
@@ -205,7 +269,7 @@ def fill_score(bottle):
 
 
 def opened_score(bottle):
-    return 1.0 if bottle.opened else 0.3
+    return 0.3 if bottle.sealed else 1.0
 
 
 def novelty_score(bottle, recent_ids):
@@ -214,27 +278,31 @@ def novelty_score(bottle, recent_ids):
 
 def build_reason(bottle, prefs):
     reasons = []
-    if bottle.opened:
+    if not bottle.sealed:
         reasons.append("already open")
     if bottle.fill_percent < 40:
         reasons.append("getting low")
+    if bottle.quantity > 1:
+        reasons.append(f"you have {bottle.quantity}")
     if (bottle.proof and prefs.preferred_proof_min is not None
             and prefs.preferred_proof_max is not None
             and prefs.preferred_proof_min <= bottle.proof <= prefs.preferred_proof_max):
         reasons.append("matches your preferred proof")
-    if any(note in prefs.liked_profiles for note in bottle.tasting_notes):
+    all_notes = bottle.world_tasting_notes + bottle.my_tasting_notes
+    if any(note in prefs.liked_profiles for note in all_notes):
         reasons.append("fits your flavor profile")
     return ", ".join(reasons) if reasons else "good match overall"
 
 
 def recommend_bottles(inventory, prefs, mode, recent_ids, top_n=3):
-    candidates = inventory.copy()
+    # Always exclude bottles with quantity 0 from recommendations
+    candidates = [b for b in inventory if b.quantity > 0]
     if mode != "special":
-        candidates = [b for b in candidates if b.opened or b.fill_percent < 50]
+        candidates = [b for b in candidates if not b.sealed or b.fill_percent < 50]
     if mode == "preservation":
         candidates = [b for b in candidates if b.fill_percent < 40]
     if not candidates:
-        candidates = inventory.copy()
+        candidates = [b for b in inventory if b.quantity > 0]
 
     scored = []
     for bottle in candidates:
@@ -258,24 +326,25 @@ def recommend_bottles(inventory, prefs, mode, recent_ids, top_n=3):
 
 
 # -----------------------------
-# Auth UI
+# UI
 # -----------------------------
 
 st.set_page_config(page_title="What Should I Pour?", page_icon="🥃", layout="centered")
 
-# Inject CSS to make the camera component preview larger
+# Bigger camera component
 st.markdown("""
 <style>
-    /* Enlarge any embedded camera/iframe component */
     iframe[title="streamlit_back_camera_input.back_camera_input"] {
         min-height: 520px !important;
         width: 100% !important;
     }
-    /* Make st.camera_input preview larger as fallback */
     [data-testid="stCameraInput"] video,
     [data-testid="stCameraInput"] img {
         min-height: 480px !important;
         object-fit: cover !important;
+    }
+    .out-of-stock {
+        opacity: 0.5;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -285,6 +354,7 @@ db = load_db()
 if "user" not in st.session_state:
     st.session_state.user = None
 
+# --- Auth screens ---
 if st.session_state.user is None:
     st.title("🥃 What Should I Pour?")
 
@@ -329,11 +399,7 @@ if st.session_state.user is None:
 
     st.stop()
 
-
-# -----------------------------
-# Logged-in UI
-# -----------------------------
-
+# --- Logged-in UI ---
 current_user = st.session_state.user
 inventory = get_user_bottles(db, current_user)
 prefs = get_user_prefs(db, current_user)
@@ -353,7 +419,7 @@ tab_recommend, tab_inventory, tab_add, tab_prefs, tab_friends = st.tabs(
 
 # --- Recommend ---
 with tab_recommend:
-    if not inventory:
+    if not [b for b in inventory if b.quantity > 0]:
         st.info("Add some bottles first.")
     else:
         mode = st.selectbox(
@@ -367,15 +433,24 @@ with tab_recommend:
             for r in results:
                 b = r["bottle"]
                 with st.container(border=True):
-                    st.subheader(b.name)
-                    st.caption(f"{b.type} · {b.proof}° proof · {b.fill_percent:.0f}% full")
+                    title = b.name
+                    if b.private_pick and b.pick_group:
+                        title += f" — {b.pick_group} pick"
+                    st.subheader(title)
+                    st.caption(
+                        f"{b.type} · {b.proof}° proof · {b.fill_percent:.0f}% full · "
+                        f"qty {b.quantity}"
+                    )
                     st.write(f"**Why:** {r['reason']}")
-                    st.write(f"**Notes:** {', '.join(b.tasting_notes)}")
+                    if b.my_tasting_notes:
+                        st.write(f"**Your notes:** {', '.join(b.my_tasting_notes)}")
+                    if b.world_tasting_notes:
+                        st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
                     if st.button("I poured this 🥃", key=f"pour_{b.id}"):
                         recent_ids = ([b.id] + recent_ids)[:10]
                         for bot in db["users"][current_user]["bottles"]:
                             if bot["id"] == b.id:
-                                bot["opened"] = True
+                                bot["sealed"] = False
                                 bot["fill_percent"] = max(0, bot["fill_percent"] - 5)
                         db["users"][current_user]["recent_ids"] = recent_ids
                         save_db(db)
@@ -386,22 +461,55 @@ with tab_recommend:
 with tab_inventory:
     if not inventory:
         st.info("No bottles yet.")
-    for b in inventory:
+
+    show_zero = st.checkbox("Show out-of-stock bottles", value=True)
+    visible = inventory if show_zero else [b for b in inventory if b.quantity > 0]
+
+    for b in visible:
+        out_of_stock = b.quantity <= 0
         with st.container(border=True):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(f"**{b.name}**")
-                st.caption(f"{b.type} · {b.proof}°")
-            with col2:
-                st.write(f"{b.fill_percent:.0f}%")
-                st.caption("open" if b.opened else "sealed")
-            new_fill = st.slider("Fill %", 0, 100, int(b.fill_percent), key=f"fill_{b.id}")
+            if out_of_stock:
+                st.markdown(
+                    f"<div class='out-of-stock'><strong>{b.name}</strong> "
+                    f"<em>(out of stock)</em></div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                title = f"**{b.name}**"
+                if b.private_pick and b.pick_group:
+                    title += f" — _{b.pick_group} pick_"
+                st.markdown(title)
+
+            st.caption(
+                f"{b.type} · {b.proof}° · "
+                f"{'sealed' if b.sealed else 'open'} · "
+                f"{b.fill_percent:.0f}% full"
+            )
+
+            c1, c2, c3 = st.columns(3)
+            new_qty = c1.number_input(
+                "Quantity", min_value=0, max_value=99,
+                value=int(b.quantity), step=1, key=f"qty_{b.id}",
+            )
+            new_fill = c2.slider(
+                "Fill %", 0, 100, int(b.fill_percent), key=f"fill_{b.id}"
+            )
+            new_sealed = c3.toggle(
+                "Sealed", value=b.sealed, key=f"sealed_{b.id}"
+            )
+
+            if b.world_tasting_notes:
+                st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+            if b.my_tasting_notes:
+                st.caption(f"My notes: {', '.join(b.my_tasting_notes)}")
+
             cols = st.columns(2)
             if cols[0].button("Update", key=f"upd_{b.id}"):
                 for bot in db["users"][current_user]["bottles"]:
                     if bot["id"] == b.id:
+                        bot["quantity"] = int(new_qty)
                         bot["fill_percent"] = new_fill
-                        bot["opened"] = new_fill < 100
+                        bot["sealed"] = bool(new_sealed)
                 save_db(db)
                 st.rerun()
             if cols[1].button("Remove", key=f"del_{b.id}"):
@@ -439,7 +547,6 @@ with tab_add:
             st.caption("Tap the video to capture (rear camera by default).")
             captured = back_camera_input(key="rear_cam")
             if captured is not None:
-                # Component returns either a data URL string or a file-like object
                 if isinstance(captured, str) and captured.startswith("data:image"):
                     header, data = captured.split(",", 1)
                     photo_mime = header.split(";")[0].replace("data:", "")
@@ -451,9 +558,7 @@ with tab_add:
                     photo_bytes = bytes(captured)
         except ImportError:
             st.warning(
-                "Rear-camera component not installed. Falling back to default camera "
-                "(may use the front-facing camera). Add `streamlit-back-camera-input` "
-                "to requirements.txt to fix."
+                "Rear-camera component not installed. Falling back to default camera."
             )
             fallback = st.camera_input("Take a photo")
             if fallback is not None:
@@ -498,29 +603,75 @@ with tab_add:
     btype = st.selectbox("Type", type_options, index=type_options.index(default_type))
     default_proof = identified.get("proof") or 90.0
     proof = st.number_input("Proof", 80.0, 160.0, float(default_proof), step=0.1)
-    notes_raw = st.text_input(
-        "Tasting notes (comma-separated)", placeholder="caramel, vanilla, oak",
-        help="You'll get better recommendations if you fill these in.",
+    quantity = st.number_input("Quantity", min_value=1, max_value=99, value=1, step=1)
+
+    # Sealed toggle: default to sealed (True) unless vision detected otherwise
+    detected_sealed = identified.get("is_sealed")
+    sealed_default = True if detected_sealed is None else bool(detected_sealed)
+    sealed = st.toggle(
+        "Sealed",
+        value=sealed_default,
+        help="On = unopened bottle. Off = already broken into.",
     )
-    fill = st.slider("Fill %", 0, 100, 100)
-    opened = st.checkbox("Already opened?", value=False)
-    store_pick = st.checkbox("Store pick?", value=False)
+    if detected_sealed is not None and identified:
+        st.caption(
+            f"_AI detected the bottle appears "
+            f"{'sealed' if detected_sealed else 'opened'} from the photo._"
+        )
+
+    fill = st.slider("Fill %", 0, 100, 100 if sealed else 90)
+
+    # Private pick toggle + conditional group field
+    detected_private = bool(identified.get("is_private_pick", False))
+    detected_pick_group = identified.get("pick_group", "") or ""
+    private_pick = st.toggle(
+        "Private Pick",
+        value=detected_private,
+        help="On = single barrel pick for a store, group, or club.",
+    )
+    pick_group = ""
+    if private_pick:
+        pick_group = st.text_input(
+            "Pick group / store",
+            value=detected_pick_group,
+            placeholder="e.g., Justins' House of Bourbon",
+        )
+
+    # Tasting notes — split into two fields
+    detected_world_notes = identified.get("tasting_notes", []) or []
+    world_default = ", ".join(detected_world_notes)
+    world_notes_raw = st.text_input(
+        "World's Tasting Notes",
+        value=world_default,
+        placeholder="caramel, vanilla, oak (auto-filled when bottle is recognized)",
+        help="Commonly known notes — auto-populated by AI when possible.",
+    )
+    my_notes_raw = st.text_input(
+        "My Tasting Notes",
+        placeholder="What you actually taste",
+        help="Your own notes — weighted more heavily in recommendations.",
+    )
 
     col_save, col_clear = st.columns(2)
     if col_save.button("Save bottle", type="primary"):
         if not name.strip():
             st.error("Name required.")
+        elif private_pick and not pick_group.strip():
+            st.error("Pick group / store required when 'Private Pick' is on.")
         else:
-            new_id = f"b_{int(random.random() * 100000)}"
+            new_id = f"b_{int(random.random() * 1_000_000)}"
             db["users"][current_user]["bottles"].append({
                 "id": new_id,
                 "name": name.strip(),
                 "type": btype,
                 "proof": proof,
-                "tasting_notes": [n.strip() for n in notes_raw.split(",") if n.strip()],
+                "world_tasting_notes": [n.strip() for n in world_notes_raw.split(",") if n.strip()],
+                "my_tasting_notes": [n.strip() for n in my_notes_raw.split(",") if n.strip()],
                 "fill_percent": float(fill),
-                "opened": opened,
-                "store_pick": store_pick,
+                "sealed": bool(sealed),
+                "quantity": int(quantity),
+                "private_pick": bool(private_pick),
+                "pick_group": pick_group.strip(),
             })
             save_db(db)
             st.session_state.pop("identified", None)
@@ -567,17 +718,22 @@ with tab_friends:
     else:
         friend = st.selectbox("View friend's inventory", options=[""] + others)
         if friend:
-            friend_bottles = get_user_bottles(db, friend)
+            friend_bottles = [b for b in get_user_bottles(db, friend) if b.quantity > 0]
             if not friend_bottles:
                 st.caption(f"{friend} hasn't added any bottles yet.")
             else:
                 st.caption(f"{friend}'s shelf — read only")
                 for b in friend_bottles:
                     with st.container(border=True):
-                        st.write(f"**{b.name}**")
+                        title = f"**{b.name}**"
+                        if b.private_pick and b.pick_group:
+                            title += f" — _{b.pick_group} pick_"
+                        st.markdown(title)
                         st.caption(
                             f"{b.type} · {b.proof}° · {b.fill_percent:.0f}% full · "
-                            f"{'open' if b.opened else 'sealed'}"
+                            f"{'sealed' if b.sealed else 'open'} · qty {b.quantity}"
                         )
-                        if b.tasting_notes:
-                            st.caption(f"Notes: {', '.join(b.tasting_notes)}")
+                        if b.my_tasting_notes:
+                            st.caption(f"Their notes: {', '.join(b.my_tasting_notes)}")
+                        elif b.world_tasting_notes:
+                            st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")

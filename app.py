@@ -1,12 +1,11 @@
 """
-Whiskey Recommendation App - Multi-user version
+Whiskey Recommendation App - Multi-user with rear camera default
 Run locally:   streamlit run app.py
 Deploy free:   push to GitHub -> share.streamlit.io
 
 Secrets needed (Streamlit Cloud Settings -> Secrets):
     anthropic_api_key = "sk-ant-..."
-    signup_code = "your-shared-invite-code"   # anyone with this can register
-    admin_username = "you"                     # optional: can manage signup code
+    signup_code = "your-shared-invite-code"
 """
 
 import base64
@@ -47,30 +46,23 @@ class Preferences:
 
 
 # -----------------------------
-# Persistence (JSON-backed; swap this layer for SQLite/Supabase later)
+# Persistence (JSON; swap this layer for SQLite/Supabase later)
 # -----------------------------
-#
-# Data shape:
-# {
-#   "users": {
-#     "username": {
-#       "password_hash": "...",
-#       "salt": "...",
-#       "bottles": [...],
-#       "preferences": {...},
-#       "recent_ids": [...]
-#     }
-#   }
-# }
 
 DATA_FILE = Path("data.json")
 
 
 def load_db() -> Dict:
-    if DATA_FILE.exists():
+    if not DATA_FILE.exists():
+        return {"users": {}}
+    try:
         with open(DATA_FILE) as f:
-            return json.load(f)
-    return {"users": {}}
+            db = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"users": {}}
+    if "users" not in db or not isinstance(db.get("users"), dict):
+        db = {"users": {}}
+    return db
 
 
 def save_db(db: Dict) -> None:
@@ -79,9 +71,7 @@ def save_db(db: Dict) -> None:
 
 
 def hash_password(password: str, salt: str) -> str:
-    return hashlib.pbkdf2_hmac(
-        "sha256", password.encode(), salt.encode(), 100_000
-    ).hex()
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000).hex()
 
 
 def create_user(db: Dict, username: str, password: str) -> None:
@@ -122,7 +112,7 @@ def list_other_users(db: Dict, current_user: str) -> List[str]:
 
 
 # -----------------------------
-# Vision: identify bottle from photo
+# Vision
 # -----------------------------
 
 def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
@@ -273,6 +263,23 @@ def recommend_bottles(inventory, prefs, mode, recent_ids, top_n=3):
 
 st.set_page_config(page_title="What Should I Pour?", page_icon="🥃", layout="centered")
 
+# Inject CSS to make the camera component preview larger
+st.markdown("""
+<style>
+    /* Enlarge any embedded camera/iframe component */
+    iframe[title="streamlit_back_camera_input.back_camera_input"] {
+        min-height: 520px !important;
+        width: 100% !important;
+    }
+    /* Make st.camera_input preview larger as fallback */
+    [data-testid="stCameraInput"] video,
+    [data-testid="stCameraInput"] img {
+        min-height: 480px !important;
+        object-fit: cover !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 db = load_db()
 
 if "user" not in st.session_state:
@@ -419,21 +426,47 @@ with tab_add:
         st.session_state.camera_open = not st.session_state.camera_open
         st.rerun()
 
-    photo = None
-    if st.session_state.camera_open:
-        photo = st.camera_input("Take a photo")
-
     uploaded = col_upload.file_uploader(
         "Upload image", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed"
     )
 
-    image_source = photo or uploaded
+    photo_bytes = None
+    photo_mime = "image/jpeg"
 
-    if image_source is not None and st.button("Identify bottle from photo", type="primary"):
+    if st.session_state.camera_open:
+        try:
+            from streamlit_back_camera_input import back_camera_input
+            st.caption("Tap the video to capture (rear camera by default).")
+            captured = back_camera_input(key="rear_cam")
+            if captured is not None:
+                # Component returns either a data URL string or a file-like object
+                if isinstance(captured, str) and captured.startswith("data:image"):
+                    header, data = captured.split(",", 1)
+                    photo_mime = header.split(";")[0].replace("data:", "")
+                    photo_bytes = base64.b64decode(data)
+                elif hasattr(captured, "getvalue"):
+                    photo_bytes = captured.getvalue()
+                    photo_mime = getattr(captured, "type", "image/jpeg") or "image/jpeg"
+                else:
+                    photo_bytes = bytes(captured)
+        except ImportError:
+            st.warning(
+                "Rear-camera component not installed. Falling back to default camera "
+                "(may use the front-facing camera). Add `streamlit-back-camera-input` "
+                "to requirements.txt to fix."
+            )
+            fallback = st.camera_input("Take a photo")
+            if fallback is not None:
+                photo_bytes = fallback.getvalue()
+                photo_mime = fallback.type or "image/jpeg"
+
+    image_bytes = photo_bytes if photo_bytes else (uploaded.getvalue() if uploaded else None)
+    image_mime = photo_mime if photo_bytes else (uploaded.type if uploaded else "image/jpeg")
+
+    if image_bytes is not None and st.button("Identify bottle from photo", type="primary"):
         with st.spinner("Reading the label..."):
             try:
-                mime = image_source.type or "image/jpeg"
-                result = identify_bottle_from_image(image_source.getvalue(), mime)
+                result = identify_bottle_from_image(image_bytes, image_mime)
                 st.session_state["identified"] = result
             except json.JSONDecodeError:
                 st.error("Claude returned invalid JSON. Try another photo or enter manually.")
@@ -526,7 +559,7 @@ with tab_prefs:
         st.success("Saved.")
         st.rerun()
 
-# --- Friends (read-only view of other users' inventories) ---
+# --- Friends ---
 with tab_friends:
     others = list_other_users(db, current_user)
     if not others:

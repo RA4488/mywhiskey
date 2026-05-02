@@ -742,7 +742,12 @@ with tab_add:
             })
             save_db(db)
             st.session_state.pop("identified", None)
-            st.success(f"Added {name}.")
+            st.toast(f"Success! Less Shelf Space Available — {name} added.", icon="🥃")
+            # Scroll the parent page (Streamlit runs scripts in an iframe) to the top
+            st.components.v1.html(
+                "<script>window.parent.scrollTo({top: 0, behavior: 'smooth'});</script>",
+                height=0,
+            )
             st.rerun()
 
     if col_clear.button("Clear photo result"):

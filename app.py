@@ -360,6 +360,79 @@ def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
     return json.loads(text)
 
 
+def detect_bottles_from_image(image_bytes: bytes, mime_type: str, source: str) -> List[Dict]:
+    """
+    Detect MULTIPLE bottles from a single image (a bar menu or backbar shelf).
+    Returns a list of dicts, one per detected bottle:
+      { name, type, proof, price, tasting_notes, confidence }
+    'source' is "menu" or "shelf" — affects the prompt.
+    """
+    from anthropic import Anthropic
+
+    api_key = st.secrets.get("anthropic_api_key")
+    if not api_key:
+        raise RuntimeError("Missing anthropic_api_key in Streamlit secrets.")
+
+    client = Anthropic(api_key=api_key)
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+    if source == "menu":
+        instruction = (
+            "This is a photo of a bar/restaurant whiskey menu. List EVERY whiskey, "
+            "bourbon, rye, scotch, or other spirit you can read on the menu. "
+            "Include price if visible (parse any currency, return as a number with no symbol)."
+        )
+    else:  # shelf
+        instruction = (
+            "This is a photo of a bar's backbar / bottle shelf. List EVERY whiskey, "
+            "bourbon, rye, scotch, or other spirit bottle you can identify by reading "
+            "the label. Skip vodkas, gins, liqueurs, and bottles you cannot read. "
+            "Be conservative — if you are not sure of the name, do not include it."
+        )
+
+    prompt = (
+        f"{instruction}\n\n"
+        "Return ONLY a JSON object with this exact shape (no other text):\n"
+        "{\n"
+        '  "bottles": [\n'
+        "    {\n"
+        '      "name": "full bottle name as written/seen",\n'
+        '      "type": "bourbon" | "rye" | "scotch" | "rum" | "other",\n'
+        '      "proof": <number or null>,\n'
+        '      "price": <number or null>,\n'
+        '      "tasting_notes": ["caramel", "oak", ...],  // 3-6 common notes if you recognize it; empty if not\n'
+        '      "confidence": <0.0-1.0>\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "Tasting notes should be lowercase single words. Use only general public knowledge "
+        "about commonly-known bottles for the notes — empty array if you don't recognize "
+        "the specific bottle. If no bottles are detectable at all, return {\"bottles\": []}."
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=4000,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": b64}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    parsed = json.loads(text)
+    return parsed.get("bottles", [])
+
+
 # -----------------------------
 # Scoring
 # -----------------------------
@@ -637,6 +710,86 @@ def build_natural_reason(bottle: Bottle, prefs: Preferences, vibe: str, recent_i
 
 
 # -----------------------------
+# Bar / "I'm at a bar" helpers
+# -----------------------------
+
+def _name_match_key(name: str) -> str:
+    """Loose normalization for matching detected names against the user's inventory."""
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
+def find_owned_match(detected_name: str, inventory: List[Bottle]) -> Optional[Bottle]:
+    """Return a bottle from the user's inventory if it loosely matches the detected name."""
+    if not detected_name:
+        return None
+    key = _name_match_key(detected_name)
+    if not key:
+        return None
+    # First try: detected name appears within an owned bottle name (or vice versa)
+    for b in inventory:
+        owned_key = _name_match_key(b.name)
+        if not owned_key:
+            continue
+        if key in owned_key or owned_key in key:
+            return b
+    return None
+
+
+def score_bar_bottle(detected: Dict, prefs: Preferences) -> float:
+    """Score a detected (not necessarily owned) bottle against user preferences."""
+    notes = detected.get("tasting_notes") or []
+    proof = detected.get("proof")
+
+    # Flavor match (only meaningful if we have notes for the bottle)
+    pref_vec = normalize(notes_to_vector(prefs.liked_profiles)) if prefs.liked_profiles else []
+    bottle_vec = normalize(notes_to_vector(notes)) if notes else []
+    if pref_vec and bottle_vec and any(v != 0 for v in bottle_vec):
+        f = cosine_similarity(bottle_vec, pref_vec)
+    else:
+        f = 0.4  # neutral-low when we have nothing to match on
+
+    # Proof match
+    if proof is None or prefs.preferred_proof_min is None or prefs.preferred_proof_max is None:
+        p = 0.5
+    elif prefs.preferred_proof_min <= proof <= prefs.preferred_proof_max:
+        p = 1.0
+    else:
+        distance = min(
+            abs(proof - prefs.preferred_proof_min),
+            abs(proof - prefs.preferred_proof_max),
+        )
+        p = max(0.0, 1.0 - (distance / 50))
+
+    # Detection confidence as a small modifier so we don't surface garbage
+    conf = float(detected.get("confidence", 0.5))
+
+    return (f * 0.55 + p * 0.30) * (0.7 + 0.3 * conf)
+
+
+def build_bar_reason(detected: Dict, prefs: Preferences, owned: Optional[Bottle]) -> str:
+    """Friendly explanation for why this bar bottle is or isn't a fit."""
+    bits = []
+    notes = detected.get("tasting_notes") or []
+    proof = detected.get("proof")
+
+    if owned:
+        bits.append("you already have this on your shelf")
+
+    matching = [n for n in notes if n in prefs.liked_profiles]
+    if matching:
+        bits.append(f"hits your notes: {', '.join(matching[:3])}")
+
+    if proof and prefs.preferred_proof_min is not None and prefs.preferred_proof_max is not None:
+        if prefs.preferred_proof_min <= proof <= prefs.preferred_proof_max:
+            bits.append(f"in your proof range ({proof:.0f}°)")
+
+    if not notes:
+        bits.append("limited info available — based mostly on proof")
+
+    return "; ".join(bits) if bits else "a reasonable pick"
+
+
+# -----------------------------
 # UI
 # -----------------------------
 
@@ -803,17 +956,18 @@ if logout_col.button("Sign out"):
 admin_username = normalize_username(st.secrets.get("admin_username", ""))
 is_admin = bool(admin_username) and current_user == admin_username
 
-tab_labels = ["Recommend", "Inventory", "Add Bottle", "Preferences", "Friends"]
+tab_labels = ["Recommend", "At the Bar", "Inventory", "Add Bottle", "Preferences", "Friends"]
 if is_admin:
     tab_labels.append("Admin")
 
 tabs = st.tabs(tab_labels)
 tab_recommend = tabs[0]
-tab_inventory = tabs[1]
-tab_add = tabs[2]
-tab_prefs = tabs[3]
-tab_friends = tabs[4]
-tab_admin = tabs[5] if is_admin else None
+tab_bar = tabs[1]
+tab_inventory = tabs[2]
+tab_add = tabs[3]
+tab_prefs = tabs[4]
+tab_friends = tabs[5]
+tab_admin = tabs[6] if is_admin else None
 
 # --- Recommend ---
 with tab_recommend:
@@ -938,6 +1092,188 @@ with tab_recommend:
                                 icon="🥃",
                             )
                             st.rerun()
+
+# --- At the Bar ---
+with tab_bar:
+    st.markdown("### 🍻 At a bar?")
+    st.caption(
+        "Snap the menu or the backbar shelf and I'll rank what to order based on "
+        "your taste. Bottles you already have at home get flagged."
+    )
+
+    source = st.radio(
+        "What are you photographing?",
+        options=["Menu", "Shelf"],
+        horizontal=True,
+        key="bar_source",
+        help=(
+            "Menus are typically more accurate (printed text). "
+            "Shelves work but depend on label visibility and lighting."
+        ),
+    )
+
+    # Camera/upload
+    if "bar_camera_open" not in st.session_state:
+        st.session_state.bar_camera_open = False
+    if "bar_uploader_version" not in st.session_state:
+        st.session_state.bar_uploader_version = 0
+
+    col_cam, col_upload = st.columns(2)
+    if col_cam.button(
+        "📷 Close camera" if st.session_state.bar_camera_open else "📷 Use camera",
+        use_container_width=True,
+        key="bar_cam_btn",
+    ):
+        st.session_state.bar_camera_open = not st.session_state.bar_camera_open
+        st.rerun()
+
+    bar_uploaded = col_upload.file_uploader(
+        "Upload image",
+        type=["jpg", "jpeg", "png", "webp"],
+        label_visibility="collapsed",
+        key=f"bar_uploader_{st.session_state.bar_uploader_version}",
+    )
+
+    bar_photo_bytes = None
+    bar_photo_mime = "image/jpeg"
+
+    if st.session_state.bar_camera_open:
+        try:
+            from streamlit_back_camera_input import back_camera_input
+            st.caption("Tap the video to capture (rear camera by default).")
+            captured = back_camera_input(key="bar_rear_cam")
+            if captured is not None:
+                if isinstance(captured, str) and captured.startswith("data:image"):
+                    header, data = captured.split(",", 1)
+                    bar_photo_mime = header.split(";")[0].replace("data:", "")
+                    bar_photo_bytes = base64.b64decode(data)
+                elif hasattr(captured, "getvalue"):
+                    bar_photo_bytes = captured.getvalue()
+                    bar_photo_mime = getattr(captured, "type", "image/jpeg") or "image/jpeg"
+                else:
+                    bar_photo_bytes = bytes(captured)
+        except ImportError:
+            fallback = st.camera_input("Take a photo")
+            if fallback is not None:
+                bar_photo_bytes = fallback.getvalue()
+                bar_photo_mime = fallback.type or "image/jpeg"
+
+    bar_image_bytes = bar_photo_bytes if bar_photo_bytes else (
+        bar_uploaded.getvalue() if bar_uploaded else None
+    )
+    bar_image_mime = bar_photo_mime if bar_photo_bytes else (
+        bar_uploaded.type if bar_uploaded else "image/jpeg"
+    )
+
+    if bar_image_bytes is not None and st.button(
+        "🔎 Analyze and recommend",
+        type="primary",
+        use_container_width=True,
+        key="bar_analyze",
+    ):
+        with st.spinner(f"Reading the {source.lower()}... this can take 10–20 seconds."):
+            try:
+                detected = detect_bottles_from_image(
+                    bar_image_bytes, bar_image_mime, source.lower()
+                )
+                st.session_state["bar_detected"] = detected
+                st.session_state["bar_source_used"] = source
+            except json.JSONDecodeError:
+                st.error("Couldn't parse the image — try a clearer shot.")
+            except Exception as e:
+                st.error(f"Couldn't analyze image: {e}")
+
+    detected = st.session_state.get("bar_detected")
+    if detected is not None:
+        if not detected:
+            st.warning(
+                "I didn't find any whiskeys I could read clearly. "
+                "Try a closer or better-lit photo, or switch between Menu and Shelf modes."
+            )
+        else:
+            # Score everything
+            scored = []
+            for d in detected:
+                owned = find_owned_match(d.get("name", ""), inventory)
+                score = score_bar_bottle(d, prefs)
+                # Small bump for owned matches so they surface (you know you like them)
+                if owned:
+                    score += 0.05
+                scored.append({
+                    "detected": d,
+                    "owned": owned,
+                    "score": score,
+                    "reason": build_bar_reason(d, prefs, owned),
+                })
+            scored.sort(key=lambda x: x["score"], reverse=True)
+
+            st.divider()
+            st.markdown(
+                f"#### Top picks from this {st.session_state.get('bar_source_used', source).lower()}"
+            )
+            st.caption(
+                f"Found **{len(detected)}** bottle"
+                f"{'s' if len(detected) != 1 else ''} · ranked by fit to your taste"
+            )
+
+            for r in scored[:3]:
+                d = r["detected"]
+                with st.container(border=True):
+                    title = f"### {d.get('name', 'Unknown')}"
+                    st.markdown(title)
+
+                    meta_parts = [d.get("type", "spirit")]
+                    if d.get("proof"):
+                        meta_parts.append(f"{d['proof']:.0f}°")
+                    if d.get("price"):
+                        meta_parts.append(f"${d['price']:.2f}")
+                    st.caption(" · ".join(meta_parts))
+
+                    if r["owned"]:
+                        st.info(
+                            f"🏠 **You already have this at home** "
+                            f"({r['owned'].fill_percent:.0f}% full, qty {r['owned'].quantity})"
+                        )
+
+                    st.markdown(f"**Why:** {r['reason']}.")
+
+                    if d.get("tasting_notes"):
+                        st.caption(f"Common notes: {', '.join(d['tasting_notes'])}")
+
+                    conf = float(d.get("confidence", 0))
+                    if conf < 0.6:
+                        st.caption(
+                            f"_Low identification confidence ({int(conf * 100)}%) — "
+                            f"the bartender may be the better source for details._"
+                        )
+
+            # See-all expander
+            if len(scored) > 3:
+                with st.expander(f"See all {len(scored)} detected bottles"):
+                    for r in scored:
+                        d = r["detected"]
+                        line = f"**{d.get('name', 'Unknown')}**"
+                        sub_bits = [d.get("type", "spirit")]
+                        if d.get("proof"):
+                            sub_bits.append(f"{d['proof']:.0f}°")
+                        if d.get("price"):
+                            sub_bits.append(f"${d['price']:.2f}")
+                        sub_bits.append(f"score: {r['score']:.2f}")
+
+                        owned_tag = " 🏠" if r["owned"] else ""
+                        st.markdown(f"{line}{owned_tag}")
+                        st.caption(" · ".join(sub_bits))
+                        if d.get("tasting_notes"):
+                            st.caption(f"_{', '.join(d['tasting_notes'])}_")
+                        st.markdown("---")
+
+            st.divider()
+            if st.button("Clear results and start over", key="bar_clear"):
+                st.session_state.pop("bar_detected", None)
+                st.session_state.pop("bar_source_used", None)
+                st.session_state.bar_uploader_version += 1
+                st.session_state.bar_camera_open = False
+                st.rerun()
 
 # --- Inventory ---
 with tab_inventory:

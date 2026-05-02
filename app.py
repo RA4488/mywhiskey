@@ -90,6 +90,9 @@ def load_db() -> Dict:
         db["users"] = new_users
         save_db(db)
 
+    # Ensure top-level collections exist
+    db.setdefault("trades", [])
+
     return db
 
 
@@ -208,6 +211,361 @@ def list_other_users(db: Dict, current_user: str) -> List[str]:
         for key, info in db["users"].items()
         if key != current_key
     )
+
+
+# -----------------------------
+# Trades
+# -----------------------------
+
+def get_trades(db: Dict) -> List[Dict]:
+    """All trades. Trades live at the top level, not under users."""
+    return db.setdefault("trades", [])
+
+
+def trades_for_user(db: Dict, username: str, statuses: Optional[List[str]] = None) -> List[Dict]:
+    """Trades where the user is sender or recipient, optionally filtered by status."""
+    key = normalize_username(username)
+    out = []
+    for t in get_trades(db):
+        if t.get("from_user") == key or t.get("to_user") == key:
+            if statuses is None or t.get("status") in statuses:
+                out.append(t)
+    return out
+
+
+def sealed_bottles_for_user(db: Dict, username: str) -> List[Bottle]:
+    """All sealed, in-stock bottles for a user — the only ones eligible for trade."""
+    return [b for b in get_user_bottles(db, username) if b.sealed and b.quantity > 0]
+
+
+def create_trade(
+    db: Dict,
+    from_user: str,
+    to_user: str,
+    offered: List[Dict],
+    requested: List[Dict],
+    message: str = "",
+    counter_to_id: Optional[str] = None,
+) -> Dict:
+    """
+    offered/requested are lists of {bottle_id, bottle_name, quantity}.
+    'offered' come from from_user's shelf; 'requested' from to_user's shelf.
+    """
+    from_key = normalize_username(from_user)
+    to_key = normalize_username(to_user)
+    now = datetime.now(timezone.utc).isoformat()
+    trade = {
+        "id": f"t_{int(random.random() * 1_000_000_000)}",
+        "from_user": from_key,
+        "to_user": to_key,
+        "status": "pending",
+        "offered": offered,
+        "requested": requested,
+        "message": message.strip(),
+        "created_at": now,
+        "updated_at": now,
+        "counter_to_id": counter_to_id,
+        "history": [{"ts": now, "actor": from_key, "action": "proposed"}],
+    }
+    get_trades(db).append(trade)
+    save_db(db)
+    return trade
+
+
+def _validate_transfer(db: Dict, items: List[Dict], owner: str) -> Optional[str]:
+    """Make sure all referenced bottles still exist, are sealed, and have quantity available."""
+    owner_key = normalize_username(owner)
+    bottles = {b["id"]: b for b in db["users"][owner_key].get("bottles", [])}
+    for item in items:
+        bid = item["bottle_id"]
+        qty = int(item.get("quantity", 1))
+        bot = bottles.get(bid)
+        if not bot:
+            return f"{owner} no longer has '{item['bottle_name']}' on their shelf."
+        if not bot.get("sealed", True):
+            return f"{owner}'s '{item['bottle_name']}' is no longer sealed."
+        if int(bot.get("quantity", 0)) < qty:
+            return f"{owner} doesn't have enough of '{item['bottle_name']}' anymore."
+    return None
+
+
+def _transfer_bottles(db: Dict, items: List[Dict], from_user: str, to_user: str) -> None:
+    """Move bottles from one user to another. Decrements sender, adds/increments recipient."""
+    from_key = normalize_username(from_user)
+    to_key = normalize_username(to_user)
+    sender_bottles = db["users"][from_key]["bottles"]
+    recipient_bottles = db["users"][to_key]["bottles"]
+
+    for item in items:
+        bid = item["bottle_id"]
+        qty = int(item.get("quantity", 1))
+
+        # Find sender's bottle
+        sender_bot = None
+        for b in sender_bottles:
+            if b["id"] == bid:
+                sender_bot = b
+                break
+        if not sender_bot:
+            continue  # validation should have caught this
+
+        # Decrement sender (don't delete record — preserves their history)
+        sender_bot["quantity"] = max(0, int(sender_bot.get("quantity", 0)) - qty)
+
+        # Add to recipient: if they already have a sealed bottle with the same
+        # name, increment quantity; otherwise create a fresh record (their copy)
+        existing = None
+        for rb in recipient_bottles:
+            if (
+                rb.get("name", "").lower().strip() == sender_bot.get("name", "").lower().strip()
+                and rb.get("sealed", True)
+            ):
+                existing = rb
+                break
+        if existing:
+            existing["quantity"] = int(existing.get("quantity", 0)) + qty
+        else:
+            new_id = f"b_{int(random.random() * 1_000_000)}"
+            recipient_bottles.append({
+                "id": new_id,
+                "name": sender_bot.get("name", ""),
+                "type": sender_bot.get("type", "other"),
+                "proof": sender_bot.get("proof"),
+                "world_tasting_notes": list(sender_bot.get("world_tasting_notes", [])),
+                "my_tasting_notes": [],  # recipient hasn't tasted it yet
+                "fill_percent": 100.0,
+                "sealed": True,
+                "quantity": qty,
+                "private_pick": sender_bot.get("private_pick", False),
+                "pick_group": sender_bot.get("pick_group", ""),
+                "size_ml": sender_bot.get("size_ml", 750),
+            })
+
+
+def accept_trade(db: Dict, trade_id: str, actor: str) -> Optional[str]:
+    """Accept a pending trade. This only AGREES to the trade — bottles don't
+    move yet. Both parties must confirm shipped + received before inventories
+    update. Returns error string or None on success."""
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] != "pending":
+        return f"This trade is already {trade['status']}."
+    if trade["to_user"] != actor_key:
+        return "Only the recipient can accept this trade."
+
+    # Validate both sides at agreement time so we don't agree to an impossible swap
+    err = _validate_transfer(db, trade["offered"], trade["from_user"])
+    if err:
+        return err
+    err = _validate_transfer(db, trade["requested"], trade["to_user"])
+    if err:
+        return err
+
+    now = datetime.now(timezone.utc).isoformat()
+    trade["status"] = "accepted"
+    trade["updated_at"] = now
+    # Initialize handoff flags. "from" = the person who originally proposed the trade.
+    trade.setdefault("from_shipped", False)
+    trade.setdefault("from_received", False)
+    trade.setdefault("to_shipped", False)
+    trade.setdefault("to_received", False)
+    trade["history"].append({"ts": now, "actor": actor_key, "action": "accepted"})
+    save_db(db)
+    return None
+
+
+def mark_shipped(db: Dict, trade_id: str, actor: str) -> Optional[str]:
+    """Mark that the actor has shipped/handed off their side of the trade."""
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] not in ("accepted",):
+        return f"Can't mark shipped — trade is {trade['status']}."
+
+    now = datetime.now(timezone.utc).isoformat()
+    if actor_key == trade["from_user"]:
+        if trade.get("from_shipped"):
+            return "You already marked this as shipped."
+        trade["from_shipped"] = True
+        trade["history"].append({"ts": now, "actor": actor_key, "action": "marked_shipped"})
+    elif actor_key == trade["to_user"]:
+        if trade.get("to_shipped"):
+            return "You already marked this as shipped."
+        trade["to_shipped"] = True
+        trade["history"].append({"ts": now, "actor": actor_key, "action": "marked_shipped"})
+    else:
+        return "You're not part of this trade."
+
+    trade["updated_at"] = now
+    _maybe_complete_trade(db, trade)
+    save_db(db)
+    return None
+
+
+def mark_received(db: Dict, trade_id: str, actor: str) -> Optional[str]:
+    """Mark that the actor has received the bottles owed to them."""
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] != "accepted":
+        return f"Can't mark received — trade is {trade['status']}."
+
+    now = datetime.now(timezone.utc).isoformat()
+    # The recipient receives what the OTHER party shipped.
+    if actor_key == trade["from_user"]:
+        # Sender receives the recipient's bottles, which require to_shipped first
+        if not trade.get("to_shipped"):
+            return f"{display_name_for(db, trade['to_user'])} hasn't marked their bottles as shipped yet."
+        if trade.get("from_received"):
+            return "You already confirmed received."
+        trade["from_received"] = True
+        trade["history"].append({"ts": now, "actor": actor_key, "action": "marked_received"})
+    elif actor_key == trade["to_user"]:
+        if not trade.get("from_shipped"):
+            return f"{display_name_for(db, trade['from_user'])} hasn't marked their bottles as shipped yet."
+        if trade.get("to_received"):
+            return "You already confirmed received."
+        trade["to_received"] = True
+        trade["history"].append({"ts": now, "actor": actor_key, "action": "marked_received"})
+    else:
+        return "You're not part of this trade."
+
+    trade["updated_at"] = now
+    _maybe_complete_trade(db, trade)
+    save_db(db)
+    return None
+
+
+def _maybe_complete_trade(db: Dict, trade: Dict) -> None:
+    """If both sides have confirmed received, transfer bottles and complete the trade."""
+    if not (trade.get("from_received") and trade.get("to_received")):
+        return
+    # Re-validate one final time — inventories may have shifted since accept
+    err = _validate_transfer(db, trade["offered"], trade["from_user"])
+    if err:
+        # Stuck — log to history but don't auto-resolve
+        trade["history"].append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "actor": "system",
+            "action": "complete_failed",
+            "note": err,
+        })
+        return
+    err = _validate_transfer(db, trade["requested"], trade["to_user"])
+    if err:
+        trade["history"].append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "actor": "system",
+            "action": "complete_failed",
+            "note": err,
+        })
+        return
+
+    _transfer_bottles(db, trade["offered"], trade["from_user"], trade["to_user"])
+    _transfer_bottles(db, trade["requested"], trade["to_user"], trade["from_user"])
+    now = datetime.now(timezone.utc).isoformat()
+    trade["status"] = "completed"
+    trade["updated_at"] = now
+    trade["history"].append({"ts": now, "actor": "system", "action": "completed"})
+
+
+def abandon_trade(db: Dict, trade_id: str, actor: str) -> Optional[str]:
+    """Either party can abandon an accepted trade that never happened.
+    No bottles move. Trade goes to 'abandoned' status."""
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] != "accepted":
+        return f"Can't abandon — trade is {trade['status']}."
+    if actor_key not in (trade["from_user"], trade["to_user"]):
+        return "You're not part of this trade."
+    now = datetime.now(timezone.utc).isoformat()
+    trade["status"] = "abandoned"
+    trade["updated_at"] = now
+    trade["history"].append({"ts": now, "actor": actor_key, "action": "abandoned"})
+    save_db(db)
+    return None
+
+
+def decline_trade(db: Dict, trade_id: str, actor: str) -> Optional[str]:
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] != "pending":
+        return f"This trade is already {trade['status']}."
+    if trade["to_user"] != actor_key:
+        return "Only the recipient can decline this trade."
+    now = datetime.now(timezone.utc).isoformat()
+    trade["status"] = "declined"
+    trade["updated_at"] = now
+    trade["history"].append({"ts": now, "actor": actor_key, "action": "declined"})
+    save_db(db)
+    return None
+
+
+def cancel_trade(db: Dict, trade_id: str, actor: str) -> Optional[str]:
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] != "pending":
+        return f"This trade is already {trade['status']}."
+    if trade["from_user"] != actor_key:
+        return "Only the sender can cancel this trade."
+    now = datetime.now(timezone.utc).isoformat()
+    trade["status"] = "canceled"
+    trade["updated_at"] = now
+    trade["history"].append({"ts": now, "actor": actor_key, "action": "canceled"})
+    save_db(db)
+    return None
+
+
+def counter_trade(
+    db: Dict,
+    original_trade_id: str,
+    actor: str,
+    new_offered: List[Dict],
+    new_requested: List[Dict],
+    message: str = "",
+) -> Optional[str]:
+    """
+    Recipient counters: original is closed (status=countered), new pending trade
+    is created from recipient back to original sender (offered/requested swap perspective).
+    """
+    actor_key = normalize_username(actor)
+    trade = next((t for t in get_trades(db) if t["id"] == original_trade_id), None)
+    if not trade:
+        return "That trade doesn't exist anymore."
+    if trade["status"] != "pending":
+        return f"This trade is already {trade['status']}."
+    if trade["to_user"] != actor_key:
+        return "Only the recipient can counter this trade."
+
+    now = datetime.now(timezone.utc).isoformat()
+    trade["status"] = "countered"
+    trade["updated_at"] = now
+    trade["history"].append({"ts": now, "actor": actor_key, "action": "countered"})
+
+    # New trade from recipient (now sender) back to original sender (now recipient).
+    # new_offered = bottles from actor's shelf
+    # new_requested = bottles from original sender's shelf
+    create_trade(
+        db,
+        from_user=actor_key,
+        to_user=trade["from_user"],
+        offered=new_offered,
+        requested=new_requested,
+        message=message,
+        counter_to_id=original_trade_id,
+    )
+    save_db(db)
+    return None
 
 
 # 1 mL = 0.033814 fl oz
@@ -1150,7 +1508,32 @@ if logout_col.button("Sign out"):
 admin_username = normalize_username(st.secrets.get("admin_username", ""))
 is_admin = bool(admin_username) and current_user == admin_username
 
-tab_labels = ["Recommend", "At the Bar", "Inventory", "Add Bottle", "Preferences", "Friends"]
+# Count trades that need my attention so we can badge the Friends tab.
+# This includes pending offers waiting on me, plus accepted trades where
+# I haven't done my part of the handoff yet.
+_my_key = normalize_username(current_user)
+_pending_inbox = [
+    t for t in trades_for_user(db, current_user, statuses=["pending"])
+    if t["to_user"] == _my_key
+]
+_my_active_todos = 0
+for _t in trades_for_user(db, current_user, statuses=["accepted"]):
+    _is_from = _t["from_user"] == _my_key
+    _i_shipped = _t.get("from_shipped" if _is_from else "to_shipped", False)
+    _i_received = _t.get("from_received" if _is_from else "to_received", False)
+    _they_shipped = _t.get("to_shipped" if _is_from else "from_shipped", False)
+    # I have a todo if: I haven't shipped yet, OR they shipped and I haven't received
+    if not _i_shipped:
+        _my_active_todos += 1
+    elif _they_shipped and not _i_received:
+        _my_active_todos += 1
+
+_total_attention = len(_pending_inbox) + _my_active_todos
+_friends_label = "Friends"
+if _total_attention:
+    _friends_label = f"Friends ({_total_attention})"
+
+tab_labels = ["Recommend", "At the Bar", "Inventory", "Add Bottle", "Preferences", _friends_label]
 if is_admin:
     tab_labels.append("Admin")
 
@@ -2008,30 +2391,486 @@ with tab_prefs:
 # --- Friends ---
 with tab_friends:
     others = list_other_users(db, current_user)
-    if not others:
-        st.info("No other users yet. Share your invite code to get friends on board.")
-    else:
-        friend = st.selectbox("View friend's inventory", options=[""] + others)
-        if friend:
-            friend_bottles = [b for b in get_user_bottles(db, friend) if b.quantity > 0]
-            if not friend_bottles:
-                st.caption(f"{friend} hasn't added any bottles yet.")
-            else:
-                st.caption(f"{friend}'s shelf — read only")
-                for b in friend_bottles:
-                    with st.container(border=True):
-                        title = f"**{b.name}**"
-                        if b.private_pick and b.pick_group:
-                            title += f" — _{b.pick_group} pick_"
-                        st.markdown(title)
-                        st.caption(
-                            f"{b.type} · {b.proof}° · {b.fill_percent:.0f}% full · "
-                            f"{'sealed' if b.sealed else 'open'} · qty {b.quantity}"
+
+    # Sub-tabs to keep the friend view, trade proposing, and trade tracking separate
+    sub_view, sub_inbox, sub_outbox, sub_progress, sub_history = st.tabs([
+        "Browse friends", "Inbox", "Sent", "In progress", "History"
+    ])
+
+    # ---- Helper: render a list of bottle items in a trade compactly ----
+    def _render_items(items: List[Dict], owner_label: str):
+        if not items:
+            st.caption(f"_{owner_label} offers nothing._")
+            return
+        for it in items:
+            qty = int(it.get("quantity", 1))
+            qty_label = f" × {qty}" if qty > 1 else ""
+            st.markdown(f"- **{it['bottle_name']}**{qty_label}")
+
+    # ---- BROWSE: pick a friend, see their shelf, propose a trade ----
+    with sub_view:
+        if not others:
+            st.info("No other users yet. Share your invite code to get friends on board.")
+        else:
+            friend_display = st.selectbox(
+                "View friend's shelf",
+                options=[""] + others,
+                key="friend_view_select",
+            )
+            if friend_display:
+                friend_key = normalize_username(friend_display)
+                friend_bottles_all = [
+                    b for b in get_user_bottles(db, friend_display) if b.quantity > 0
+                ]
+                friend_sealed = [b for b in friend_bottles_all if b.sealed]
+
+                colA, colB = st.columns([3, 2])
+                colA.caption(f"{friend_display}'s shelf — read only")
+                if friend_sealed:
+                    if colB.button(
+                        "🤝 Propose a trade",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"open_trade_{friend_key}",
+                    ):
+                        st.session_state["trade_target"] = friend_key
+                        st.session_state["trade_target_display"] = friend_display
+                        # Reset selections from any prior session
+                        st.session_state.pop("trade_request_picks", None)
+                        st.session_state.pop("trade_offer_picks", None)
+                        st.session_state.pop("trade_message", None)
+                        st.rerun()
+                else:
+                    colB.caption("_No sealed bottles to trade for._")
+
+                if not friend_bottles_all:
+                    st.caption(f"{friend_display} hasn't added any bottles yet.")
+                else:
+                    for b in friend_bottles_all:
+                        with st.container(border=True):
+                            title = f"**{b.name}**"
+                            if b.private_pick and b.pick_group:
+                                title += f" — _{b.pick_group} pick_"
+                            st.markdown(title)
+                            st.caption(
+                                f"{b.type} · {b.proof}° · {b.fill_percent:.0f}% full · "
+                                f"{'sealed 🔒' if b.sealed else 'open'} · qty {b.quantity}"
+                            )
+                            if b.my_tasting_notes:
+                                st.caption(f"Their notes: {', '.join(b.my_tasting_notes)}")
+                            elif b.world_tasting_notes:
+                                st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+
+            # Trade composer (appears below browser when a trade is in progress)
+            if st.session_state.get("trade_target"):
+                target_key = st.session_state["trade_target"]
+                target_display = st.session_state.get("trade_target_display", target_key)
+
+                st.markdown("---")
+                st.markdown(f"### 🤝 Propose a trade with **{target_display}**")
+                st.caption("Sealed bottles only on both sides.")
+
+                # Their sealed bottles -> what you want
+                their_sealed = sealed_bottles_for_user(db, target_display)
+                # Your sealed bottles -> what you'll offer
+                my_sealed = sealed_bottles_for_user(db, current_user)
+
+                col_req, col_off = st.columns(2)
+                with col_req:
+                    st.markdown(f"#### What you want from {target_display}")
+                    if not their_sealed:
+                        st.caption("_They have no sealed bottles right now._")
+                        request_items = []
+                    else:
+                        request_items = []
+                        for b in their_sealed:
+                            label = b.name + (f" — {b.pick_group} pick" if b.private_pick and b.pick_group else "")
+                            label += f"  ({b.proof:.0f}°)"
+                            picked = st.checkbox(
+                                label,
+                                key=f"req_pick_{b.id}",
+                            )
+                            if picked:
+                                qty = 1
+                                if b.quantity > 1:
+                                    qty = st.number_input(
+                                        f"  Quantity (they have {b.quantity})",
+                                        min_value=1, max_value=b.quantity, value=1,
+                                        key=f"req_qty_{b.id}",
+                                    )
+                                request_items.append({
+                                    "bottle_id": b.id,
+                                    "bottle_name": b.name,
+                                    "quantity": int(qty),
+                                })
+
+                with col_off:
+                    st.markdown(f"#### What you'll offer")
+                    if not my_sealed:
+                        st.caption("_You have no sealed bottles to offer._")
+                        offer_items = []
+                    else:
+                        offer_items = []
+                        for b in my_sealed:
+                            label = b.name + (f" — {b.pick_group} pick" if b.private_pick and b.pick_group else "")
+                            label += f"  ({b.proof:.0f}°)"
+                            picked = st.checkbox(
+                                label,
+                                key=f"off_pick_{b.id}",
+                            )
+                            if picked:
+                                qty = 1
+                                if b.quantity > 1:
+                                    qty = st.number_input(
+                                        f"  Quantity (you have {b.quantity})",
+                                        min_value=1, max_value=b.quantity, value=1,
+                                        key=f"off_qty_{b.id}",
+                                    )
+                                offer_items.append({
+                                    "bottle_id": b.id,
+                                    "bottle_name": b.name,
+                                    "quantity": int(qty),
+                                })
+
+                msg = st.text_area(
+                    "Optional message",
+                    placeholder="Anything you want to say with the offer?",
+                    key="trade_message",
+                )
+
+                send_col, cancel_col = st.columns([3, 1])
+                if send_col.button(
+                    f"📨 Send offer to {target_display}",
+                    type="primary",
+                    use_container_width=True,
+                    key="send_trade_btn",
+                ):
+                    if not request_items and not offer_items:
+                        st.error("Pick at least one bottle on either side.")
+                    elif not request_items:
+                        st.error("Pick at least one bottle you want from them.")
+                    elif not offer_items:
+                        st.error("Pick at least one bottle to offer.")
+                    else:
+                        create_trade(
+                            db,
+                            from_user=current_user,
+                            to_user=target_key,
+                            offered=offer_items,
+                            requested=request_items,
+                            message=msg or "",
                         )
-                        if b.my_tasting_notes:
-                            st.caption(f"Their notes: {', '.join(b.my_tasting_notes)}")
-                        elif b.world_tasting_notes:
-                            st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+                        st.session_state.pop("trade_target", None)
+                        st.session_state.pop("trade_target_display", None)
+                        st.toast(f"Offer sent to {target_display} 🤝", icon="📨")
+                        st.rerun()
+
+                if cancel_col.button("Cancel", key="cancel_compose"):
+                    st.session_state.pop("trade_target", None)
+                    st.session_state.pop("trade_target_display", None)
+                    st.rerun()
+
+    # ---- INBOX: trades sent TO the current user that are pending ----
+    with sub_inbox:
+        pending_in = [
+            t for t in trades_for_user(db, current_user, statuses=["pending"])
+            if t["to_user"] == normalize_username(current_user)
+        ]
+        if not pending_in:
+            st.caption("No pending offers right now.")
+        else:
+            st.caption(f"You have **{len(pending_in)}** offer{'s' if len(pending_in) != 1 else ''} waiting on you.")
+
+        for t in pending_in:
+            sender_display = display_name_for(db, t["from_user"])
+            with st.container(border=True):
+                st.markdown(f"### From **{sender_display}**")
+                if t.get("message"):
+                    st.markdown(f"_\"{t['message']}\"_")
+
+                col_o, col_r = st.columns(2)
+                with col_o:
+                    st.markdown(f"**They give you:**")
+                    _render_items(t["offered"], sender_display)
+                with col_r:
+                    st.markdown(f"**You give them:**")
+                    _render_items(t["requested"], "You")
+
+                accept_col, decline_col, counter_col = st.columns(3)
+                if accept_col.button("✅ Accept", key=f"acc_{t['id']}", type="primary", use_container_width=True):
+                    err = accept_trade(db, t["id"], current_user)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.toast("Trade accepted 🤝", icon="🥃")
+                        st.rerun()
+                if decline_col.button("❌ Decline", key=f"dec_{t['id']}", use_container_width=True):
+                    err = decline_trade(db, t["id"], current_user)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.rerun()
+                if counter_col.button("↔️ Counter", key=f"cnt_btn_{t['id']}", use_container_width=True):
+                    st.session_state["countering_trade_id"] = t["id"]
+                    st.rerun()
+
+                # Inline counter-offer composer
+                if st.session_state.get("countering_trade_id") == t["id"]:
+                    st.markdown("---")
+                    st.markdown("**Build your counter-offer**")
+                    st.caption("Sealed bottles only.")
+                    sender_sealed = sealed_bottles_for_user(db, t["from_user"])
+                    my_sealed = sealed_bottles_for_user(db, current_user)
+
+                    cc_req, cc_off = st.columns(2)
+                    new_requested = []
+                    new_offered = []
+
+                    with cc_req:
+                        st.markdown(f"_What you want from {sender_display}:_")
+                        for b in sender_sealed:
+                            label = f"{b.name} ({b.proof:.0f}°)"
+                            if st.checkbox(label, key=f"cnt_req_{t['id']}_{b.id}"):
+                                qty = 1
+                                if b.quantity > 1:
+                                    qty = st.number_input(
+                                        f"  Qty (they have {b.quantity})",
+                                        min_value=1, max_value=b.quantity, value=1,
+                                        key=f"cnt_req_qty_{t['id']}_{b.id}",
+                                    )
+                                new_requested.append({
+                                    "bottle_id": b.id,
+                                    "bottle_name": b.name,
+                                    "quantity": int(qty),
+                                })
+
+                    with cc_off:
+                        st.markdown("_What you'll offer:_")
+                        for b in my_sealed:
+                            label = f"{b.name} ({b.proof:.0f}°)"
+                            if st.checkbox(label, key=f"cnt_off_{t['id']}_{b.id}"):
+                                qty = 1
+                                if b.quantity > 1:
+                                    qty = st.number_input(
+                                        f"  Qty (you have {b.quantity})",
+                                        min_value=1, max_value=b.quantity, value=1,
+                                        key=f"cnt_off_qty_{t['id']}_{b.id}",
+                                    )
+                                new_offered.append({
+                                    "bottle_id": b.id,
+                                    "bottle_name": b.name,
+                                    "quantity": int(qty),
+                                })
+
+                    counter_msg = st.text_area(
+                        "Note (optional)",
+                        key=f"cnt_msg_{t['id']}",
+                        placeholder="Why this works better for you, etc.",
+                    )
+
+                    send_cnt, cancel_cnt = st.columns([3, 1])
+                    if send_cnt.button(
+                        "📨 Send counter-offer",
+                        type="primary",
+                        key=f"cnt_send_{t['id']}",
+                        use_container_width=True,
+                    ):
+                        if not new_requested or not new_offered:
+                            st.error("Pick at least one bottle on each side.")
+                        else:
+                            err = counter_trade(
+                                db, t["id"], current_user,
+                                new_offered=new_offered,
+                                new_requested=new_requested,
+                                message=counter_msg or "",
+                            )
+                            if err:
+                                st.error(err)
+                            else:
+                                st.session_state.pop("countering_trade_id", None)
+                                st.toast("Counter-offer sent ↔️", icon="📨")
+                                st.rerun()
+                    if cancel_cnt.button("Cancel", key=f"cnt_cancel_{t['id']}"):
+                        st.session_state.pop("countering_trade_id", None)
+                        st.rerun()
+
+    # ---- SENT: trades the current user has open with others ----
+    with sub_outbox:
+        pending_out = [
+            t for t in trades_for_user(db, current_user, statuses=["pending"])
+            if t["from_user"] == normalize_username(current_user)
+        ]
+        if not pending_out:
+            st.caption("Nothing waiting on a friend's response.")
+        for t in pending_out:
+            recipient_display = display_name_for(db, t["to_user"])
+            with st.container(border=True):
+                st.markdown(f"### To **{recipient_display}**")
+                if t.get("message"):
+                    st.markdown(f"_\"{t['message']}\"_")
+
+                col_o, col_r = st.columns(2)
+                with col_o:
+                    st.markdown("**You're offering:**")
+                    _render_items(t["offered"], "You")
+                with col_r:
+                    st.markdown(f"**You want from {recipient_display}:**")
+                    _render_items(t["requested"], recipient_display)
+
+                if st.button("🚫 Cancel offer", key=f"cancel_{t['id']}"):
+                    err = cancel_trade(db, t["id"], current_user)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.rerun()
+
+    # ---- IN PROGRESS: trades agreed to but not yet completed ----
+    with sub_progress:
+        my_key = normalize_username(current_user)
+        active = [
+            t for t in trades_for_user(db, current_user, statuses=["accepted"])
+        ]
+        if not active:
+            st.caption(
+                "No trades in progress. When an offer is accepted, it shows up here "
+                "until both sides confirm the bottles have changed hands."
+            )
+
+        for t in active:
+            is_from = t["from_user"] == my_key
+            other_key = t["to_user"] if is_from else t["from_user"]
+            other_display = display_name_for(db, other_key)
+
+            # What "I" send vs receive based on perspective
+            if is_from:
+                i_send = t["offered"]
+                i_receive = t["requested"]
+                i_shipped = t.get("from_shipped", False)
+                i_received = t.get("from_received", False)
+                they_shipped = t.get("to_shipped", False)
+                they_received = t.get("to_received", False)
+            else:
+                i_send = t["requested"]
+                i_receive = t["offered"]
+                i_shipped = t.get("to_shipped", False)
+                i_received = t.get("to_received", False)
+                they_shipped = t.get("from_shipped", False)
+                they_received = t.get("from_received", False)
+
+            with st.container(border=True):
+                st.markdown(f"### Trade with **{other_display}**")
+                if t.get("message"):
+                    st.markdown(f"_\"{t['message']}\"_")
+
+                col_i, col_t = st.columns(2)
+                with col_i:
+                    st.markdown("**You send:**")
+                    _render_items(i_send, "You")
+                    if i_shipped:
+                        st.success("✅ You marked these shipped")
+                    else:
+                        st.caption("⏳ Not yet marked shipped")
+                with col_t:
+                    st.markdown(f"**You receive (from {other_display}):**")
+                    _render_items(i_receive, other_display)
+                    if they_shipped:
+                        st.info(f"📦 {other_display} marked shipped — waiting on you to confirm received")
+                    else:
+                        st.caption(f"⏳ {other_display} hasn't shipped yet")
+
+                # Action buttons
+                act_cols = st.columns(3)
+                if not i_shipped:
+                    if act_cols[0].button(
+                        "📦 I shipped my side",
+                        key=f"ship_{t['id']}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        err = mark_shipped(db, t["id"], current_user)
+                        if err:
+                            st.error(err)
+                        else:
+                            st.toast("Marked as shipped 📦", icon="✅")
+                            st.rerun()
+                else:
+                    act_cols[0].caption("_Shipped ✓_")
+
+                # Receive button only enabled if other party has shipped
+                if not i_received:
+                    if act_cols[1].button(
+                        "🥃 I got the bottles",
+                        key=f"recv_{t['id']}",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=not they_shipped,
+                    ):
+                        err = mark_received(db, t["id"], current_user)
+                        if err:
+                            st.error(err)
+                        else:
+                            st.toast("Confirmed received 🥃", icon="🤝")
+                            st.rerun()
+                else:
+                    act_cols[1].caption("_Received ✓_")
+
+                if act_cols[2].button(
+                    "🚫 Abandon trade",
+                    key=f"abandon_{t['id']}",
+                    use_container_width=True,
+                ):
+                    err = abandon_trade(db, t["id"], current_user)
+                    if err:
+                        st.error(err)
+                    else:
+                        st.toast("Trade abandoned", icon="🚫")
+                        st.rerun()
+
+                # Visual progress summary
+                steps_done = sum([i_shipped, i_received, they_shipped, they_received])
+                st.caption(f"Handoff progress: **{steps_done} / 4** steps done")
+
+    # ---- HISTORY: closed trades (completed, declined, canceled, countered, abandoned) ----
+    with sub_history:
+        archived = [
+            t for t in trades_for_user(db, current_user)
+            if t["status"] in ("completed", "declined", "canceled", "countered", "abandoned")
+        ]
+        if not archived:
+            st.caption("No completed trades yet.")
+        # Sort newest first
+        archived.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+
+        status_emoji = {
+            "completed": "🤝",
+            "declined": "❌",
+            "canceled": "🚫",
+            "countered": "↔️",
+            "abandoned": "🪦",
+        }
+        for t in archived:
+            other = t["to_user"] if t["from_user"] == normalize_username(current_user) else t["from_user"]
+            other_display = display_name_for(db, other)
+            direction = "→" if t["from_user"] == normalize_username(current_user) else "←"
+            emoji = status_emoji.get(t["status"], "•")
+
+            with st.expander(
+                f"{emoji}  **{t['status'].title()}**  {direction}  {other_display}  "
+                f"·  {t.get('updated_at', '')[:10]}"
+            ):
+                if t.get("message"):
+                    st.markdown(f"_\"{t['message']}\"_")
+                col_o, col_r = st.columns(2)
+                from_display = display_name_for(db, t["from_user"])
+                to_display = display_name_for(db, t["to_user"])
+                with col_o:
+                    st.markdown(f"**{from_display} offered:**")
+                    _render_items(t["offered"], from_display)
+                with col_r:
+                    st.markdown(f"**{to_display} would have given:**")
+                    _render_items(t["requested"], to_display)
+                if t.get("counter_to_id"):
+                    st.caption("_Counter-offer to a previous trade._")
 
 # --- Admin (only visible to admin user) ---
 if tab_admin is not None:

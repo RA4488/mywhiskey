@@ -16,6 +16,7 @@ import math
 import random
 import secrets
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -116,6 +117,7 @@ def create_user(db: Dict, username: str, password: str) -> None:
         "bottles": [],
         "preferences": {},
         "recent_ids": [],
+        "pour_log": [],  # [{ts, bottle_id, oz, vibe}]
     }
     save_db(db)
 
@@ -220,12 +222,35 @@ def pour_to_fill_drop(pour_oz: float, size_ml: int) -> float:
     return (pour_ml / size_ml) * 100
 
 
-def log_pour(db: Dict, username: str, bottle_id: str, pour_oz: float) -> None:
-    """Apply a pour: drop fill, mark unsealed, push to recent_ids."""
+def log_pour(
+    db: Dict,
+    username: str,
+    bottle_id: str,
+    pour_oz: float,
+    vibe: Optional[str] = None,
+) -> None:
+    """Apply a pour: drop fill, mark unsealed, push to recent_ids, append to pour_log."""
     user_key = normalize_username(username)
     user_record = db["users"][user_key]
+
+    # Recent IDs (legacy novelty signal — keep for backward compat)
     recent_ids = user_record.get("recent_ids", [])
     recent_ids = ([bottle_id] + [x for x in recent_ids if x != bottle_id])[:10]
+    user_record["recent_ids"] = recent_ids
+
+    # Full pour log (Phase 1: data foundation for learning)
+    pour_log = user_record.setdefault("pour_log", [])
+    pour_log.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "bottle_id": bottle_id,
+        "oz": float(pour_oz),
+        "vibe": vibe,
+    })
+    # Cap log at 1000 entries to keep JSON manageable
+    if len(pour_log) > 1000:
+        del pour_log[: len(pour_log) - 1000]
+
+    # Update the bottle itself
     for bot in user_record["bottles"]:
         if bot["id"] == bottle_id:
             size_ml = bot.get("size_ml", 750)
@@ -233,8 +258,85 @@ def log_pour(db: Dict, username: str, bottle_id: str, pour_oz: float) -> None:
             bot["sealed"] = False
             bot["fill_percent"] = max(0, bot["fill_percent"] - drop)
             break
-    user_record["recent_ids"] = recent_ids
+
     save_db(db)
+
+
+# -----------------------------
+# Phase 2: Learned affinity from pour history
+# -----------------------------
+
+def get_pour_log(db: Dict, username: str) -> List[Dict]:
+    user_key = normalize_username(username)
+    return db["users"][user_key].get("pour_log", [])
+
+
+def _parse_ts(ts_str: str) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def compute_affinity_scores(pour_log: List[Dict], half_life_days: float = 60.0) -> Dict[str, float]:
+    """
+    0-1 affinity score per bottle from pour history.
+    Combines pour count, pour size, and recency (older pours decay exponentially).
+    Normalized so the most-poured bottle is ~1.0; bottles never poured aren't included.
+    """
+    if not pour_log:
+        return {}
+
+    now = datetime.now(timezone.utc)
+    raw: Dict[str, float] = {}
+
+    for entry in pour_log:
+        bid = entry.get("bottle_id")
+        oz = float(entry.get("oz", 1.0))
+        ts = _parse_ts(entry.get("ts", "")) if entry.get("ts") else None
+        if not bid:
+            continue
+
+        if ts:
+            days_old = max(0.0, (now - ts).total_seconds() / 86400)
+            weight = 0.5 ** (days_old / half_life_days)
+        else:
+            weight = 0.5  # unknown age
+
+        raw[bid] = raw.get(bid, 0.0) + (oz * weight)
+
+    if not raw:
+        return {}
+
+    peak = max(raw.values())
+    if peak <= 0:
+        return {}
+    return {bid: round(v / peak, 4) for bid, v in raw.items()}
+
+
+def affinity_signal(bottle: Bottle, affinity: Dict[str, float]) -> float:
+    """Map raw affinity to a recommendation signal. 0.5 = no data."""
+    return affinity.get(bottle.id, 0.5)
+
+
+def days_since_last_pour(pour_log: List[Dict]) -> Dict[str, Optional[int]]:
+    """
+    For each bottle that's ever been poured, return days since the last pour.
+    Bottles never poured are absent from the result.
+    """
+    now = datetime.now(timezone.utc)
+    last_seen: Dict[str, datetime] = {}
+    for entry in pour_log:
+        bid = entry.get("bottle_id")
+        ts = _parse_ts(entry.get("ts", "")) if entry.get("ts") else None
+        if not bid or not ts:
+            continue
+        if bid not in last_seen or ts > last_seen[bid]:
+            last_seen[bid] = ts
+    return {
+        bid: int((now - ts).total_seconds() // 86400)
+        for bid, ts in last_seen.items()
+    }
 
 
 # --- Search & sort helpers ---
@@ -521,23 +623,31 @@ def build_reason(bottle, prefs):
 VIBES = {
     "Just a regular pour": {
         "blurb": "Something I'd reach for on any given evening.",
-        "weights": {"flavor": 0.35, "proof": 0.15, "fill": 0.20, "opened": 0.15, "novelty": 0.15},
+        "weights": {"flavor": 0.25, "proof": 0.10, "fill": 0.15, "opened": 0.10, "novelty": 0.10, "affinity": 0.30},
         "filters": {"opened_or_low": True},
     },
     "Easy sipper before bed": {
         "blurb": "Lower proof, smooth, doesn't ask much of me.",
-        "weights": {"flavor": 0.30, "low_proof": 0.30, "fill": 0.15, "opened": 0.15, "novelty": 0.10},
+        "weights": {"flavor": 0.25, "low_proof": 0.25, "fill": 0.10, "opened": 0.10, "novelty": 0.05, "affinity": 0.25},
         "filters": {"opened_or_low": True, "max_proof": 105},
     },
     "Sharing with company": {
         "blurb": "Crowd-pleaser. Probably not my weirdest bottle.",
-        "weights": {"flavor": 0.20, "proof": 0.10, "fill": 0.15, "opened": 0.20, "novelty": 0.10, "crowd": 0.25},
+        "weights": {"flavor": 0.15, "proof": 0.10, "fill": 0.10, "opened": 0.15, "novelty": 0.05, "crowd": 0.20, "affinity": 0.25},
         "filters": {"opened_or_low": True},
     },
     "Want to focus and taste": {
+        # Lower affinity weight here — point is to discover, not repeat favorites
         "blurb": "Something interesting, worth paying attention to.",
         "weights": {"flavor": 0.30, "proof": 0.15, "fill": 0.10, "interesting": 0.30, "novelty": 0.15},
         "filters": {"opened_or_low": True},
+    },
+    "The Forgotten Ones": {
+        # Custom-scored — uses days_since_last_pour rather than the weight system
+        "blurb": "Bottles you haven't touched in a while. Time to bring them back.",
+        "weights": {},  # ignored; uses forgotten-specific scoring
+        "filters": {},  # custom — handled inline
+        "forgotten": True,
     },
     "Surprise me": {
         "blurb": "Roll the dice — pick something random.",
@@ -593,15 +703,74 @@ def recommend_bottles(
     recent_ids: List[str],
     top_n: int = 3,
     people_count: int = 1,
+    affinity: Optional[Dict[str, float]] = None,
+    pour_log: Optional[List[Dict]] = None,
 ) -> List[Dict]:
-    """Vibe-driven recommendation. people_count adjusts share-friendliness."""
+    """Vibe-driven recommendation. Affinity (learned from pour history) is layered in."""
     vibe_config = VIBES.get(vibe, VIBES["Just a regular pour"])
     filters = vibe_config["filters"]
     weights = vibe_config["weights"]
+    affinity = affinity or {}
+    pour_log = pour_log or []
 
     # Always exclude empty bottles
     candidates = [b for b in inventory if b.quantity > 0]
 
+    # --- Special-case: The Forgotten Ones ---
+    if vibe_config.get("forgotten"):
+        days_since = days_since_last_pour(pour_log)
+        NEGLECT_DAYS = 60        # threshold for "starting to be forgotten"
+        DEEP_DAYS = 120          # threshold for "deeply forgotten"
+
+        # Bottles never poured are also "forgotten" — but only if you've owned
+        # them long enough that you'd reasonably have tried them by now. Since
+        # we don't track add date yet, treat all never-poured bottles as eligible
+        # but rank them lower than confirmed-neglected open bottles.
+        eligible = []
+        for b in candidates:
+            d = days_since.get(b.id)  # None if never poured
+            if d is None:
+                # Never poured. Eligible but lower-ranked.
+                eligible.append((b, -1))
+            elif d >= NEGLECT_DAYS:
+                eligible.append((b, d))
+
+        if not eligible:
+            # Nothing qualifies — explain by returning empty
+            return []
+
+        scored = []
+        for b, d in eligible:
+            score = 0.0
+            if d >= DEEP_DAYS:
+                score += 1.0  # baseline: deeply forgotten
+            elif d >= NEGLECT_DAYS:
+                # Linear ramp from 0.5 at 60 days to 1.0 at 120 days
+                score += 0.5 + 0.5 * ((d - NEGLECT_DAYS) / (DEEP_DAYS - NEGLECT_DAYS))
+            else:
+                # Never-poured fallback
+                score += 0.3
+
+            # Open bottles get a bonus — they're actively at risk of degrading
+            if not b.sealed:
+                score += 0.25
+
+            # Tiny preference signal so the result still loosely fits taste
+            score += 0.10 * flavor_score(b, prefs)
+
+            scored.append((b, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [
+            {
+                "bottle": b,
+                "score": round(s, 3),
+                "reason": build_natural_reason(b, prefs, vibe, recent_ids, affinity, days_since.get(b.id)),
+            }
+            for b, s in scored[:top_n]
+        ]
+
+    # --- Standard vibe path ---
     # Apply vibe filters
     if filters.get("opened_or_low"):
         opened_or_low = [b for b in candidates if not b.sealed or b.fill_percent < 50]
@@ -615,7 +784,6 @@ def recommend_bottles(
     if not candidates:
         candidates = [b for b in inventory if b.quantity > 0]
 
-    # If sharing with multiple people, bias toward share-friendly bottles
     sharing_boost = people_count >= 2
 
     scored = []
@@ -631,6 +799,7 @@ def recommend_bottles(
             n = novelty_score(bottle, recent_ids)
             c = crowd_score(bottle)
             i = interesting_score(bottle)
+            a = affinity_signal(bottle, affinity)
 
             total = (
                 weights.get("flavor", 0) * f
@@ -641,9 +810,10 @@ def recommend_bottles(
                 + weights.get("novelty", 0) * n
                 + weights.get("crowd", 0) * c
                 + weights.get("interesting", 0) * i
+                + weights.get("affinity", 0) * a
             )
             if sharing_boost:
-                total += 0.10 * c  # extra nudge toward crowd-pleasers
+                total += 0.10 * c
 
         scored.append((bottle, total))
 
@@ -652,15 +822,23 @@ def recommend_bottles(
         {
             "bottle": b,
             "score": round(s, 3),
-            "reason": build_natural_reason(b, prefs, vibe, recent_ids),
+            "reason": build_natural_reason(b, prefs, vibe, recent_ids, affinity),
         }
         for b, s in scored[:top_n]
     ]
 
 
-def build_natural_reason(bottle: Bottle, prefs: Preferences, vibe: str, recent_ids: List[str]) -> str:
+def build_natural_reason(
+    bottle: Bottle,
+    prefs: Preferences,
+    vibe: str,
+    recent_ids: List[str],
+    affinity: Optional[Dict[str, float]] = None,
+    days_since: Optional[int] = None,
+) -> str:
     """Generate a friendly, conversational reason this bottle fits the vibe."""
     bits = []
+    affinity = affinity or {}
 
     # Vibe-specific framing
     if vibe == "Easy sipper before bed":
@@ -685,6 +863,27 @@ def build_natural_reason(bottle: Bottle, prefs: Preferences, vibe: str, recent_i
     elif vibe == "Just a regular pour":
         if not bottle.sealed:
             bits.append("already open and ready")
+    elif vibe == "The Forgotten Ones":
+        if days_since is None:
+            bits.append("haven't poured this one yet")
+        elif days_since >= 365:
+            years = days_since // 365
+            bits.append(f"untouched for over a year ({years}y)")
+        elif days_since >= 180:
+            bits.append(f"hasn't seen the light in {days_since // 30} months")
+        elif days_since >= 120:
+            bits.append(f"forgotten for ~{days_since // 30} months")
+        else:
+            bits.append(f"about {days_since} days since your last pour")
+        if not bottle.sealed:
+            bits.append("open and slowly losing freshness")
+
+    # Learned-affinity flavor: only mention when it's a strong signal
+    affinity_score = affinity.get(bottle.id, 0)
+    if affinity_score >= 0.8:
+        bits.append("one of your most-poured")
+    elif affinity_score >= 0.5:
+        bits.append("you've been reaching for this")
 
     # Cross-vibe reasons
     if bottle.fill_percent < 30:
@@ -697,14 +896,9 @@ def build_natural_reason(bottle: Bottle, prefs: Preferences, vibe: str, recent_i
     if matching_notes:
         bits.append(f"notes you like: {', '.join(matching_notes[:3])}")
 
-    if bottle.id not in recent_ids and bottle.fill_percent < 95:
-        # haven't poured this lately
-        pass  # avoid every result saying "haven't had this lately"
-
     if not bits:
         bits.append("a good fit for what you're after")
 
-    # Capitalize first letter, join with semicolons for visual rhythm
     reason = "; ".join(bits)
     return reason[0].upper() + reason[1:] if reason else reason
 
@@ -997,10 +1191,41 @@ with tab_recommend:
                 height=0,
             )
     else:
+        # Compute learned affinity from full pour history
+        pour_log = get_pour_log(db, current_user)
+        affinity = compute_affinity_scores(pour_log)
+
+        # --- Top pours panel: show what the app has learned ---
+        if affinity:
+            id_to_bottle = {b.id: b for b in inventory}
+            ranked = sorted(affinity.items(), key=lambda kv: kv[1], reverse=True)
+            top_for_panel = [
+                (id_to_bottle[bid], score)
+                for bid, score in ranked
+                if bid in id_to_bottle
+            ][:5]
+
+            if top_for_panel:
+                with st.expander(
+                    f"⭐ Your top pours — what the app has learned ({len(pour_log)} pours logged)",
+                    expanded=False,
+                ):
+                    st.caption(
+                        "Built from your pour history. Bigger pours and recent pours "
+                        "count more. The 'Just a regular pour' vibe leans on this most."
+                    )
+                    for b, score in top_for_panel:
+                        # Render as a horizontal bar via stars
+                        stars = "★" * max(1, round(score * 5)) + "☆" * (5 - max(1, round(score * 5)))
+                        st.markdown(f"**{b.name}** {stars}")
+                        st.caption(
+                            f"{b.type} · {b.proof:.0f}° · "
+                            f"{b.fill_percent:.0f}% full · affinity {int(score * 100)}%"
+                        )
+
         st.markdown("### What's the vibe?")
 
         vibe_keys = list(VIBES.keys())
-        # Use a radio with vertical layout so the blurb fits comfortably
         vibe = st.radio(
             "Vibe",
             options=vibe_keys,
@@ -1010,7 +1235,6 @@ with tab_recommend:
             key="vibe",
         )
 
-        # Optional context controls in an expander to keep the surface clean
         with st.expander("More context (optional)"):
             people_count = st.slider(
                 "How many people drinking?",
@@ -1019,7 +1243,6 @@ with tab_recommend:
             )
             top_n = st.slider("Number of suggestions", 1, 5, 3)
 
-        # Quick-recommend button
         if st.button(
             "🥃 Recommend me a pour",
             type="primary",
@@ -1029,6 +1252,8 @@ with tab_recommend:
                 inventory, prefs, vibe, recent_ids,
                 top_n=top_n,
                 people_count=people_count,
+                affinity=affinity,
+                pour_log=pour_log,
             )
             st.session_state["last_recommendation"] = {
                 "results_ids": [r["bottle"].id for r in results],
@@ -1044,14 +1269,26 @@ with tab_recommend:
             shown = [id_to_bottle[bid] for bid in id_set if bid in id_to_bottle]
 
             if not shown:
-                st.info("Those bottles aren't available anymore. Pick a vibe and recommend again.")
+                if last["vibe"] == "The Forgotten Ones":
+                    st.info(
+                        "Nothing's been forgotten yet — every open bottle has been "
+                        "poured recently. Try this again in a month or so."
+                    )
+                else:
+                    st.info("Those bottles aren't available anymore. Pick a vibe and recommend again.")
             else:
                 st.markdown("---")
                 st.markdown(f"#### For **{last['vibe'].lower()}** — here's what I'd pour:")
 
+                # Pre-compute days-since for use in the per-result reason
+                last_days_since = days_since_last_pour(pour_log)
+
                 for b in shown:
-                    # Re-derive the reason for this bottle in case state has shifted
-                    reason = build_natural_reason(b, prefs, last["vibe"], recent_ids)
+                    # Re-derive the reason in case state has shifted
+                    reason = build_natural_reason(
+                        b, prefs, last["vibe"], recent_ids, affinity,
+                        last_days_since.get(b.id),
+                    )
                     with st.container(border=True):
                         title = f"### {b.name}"
                         if b.private_pick and b.pick_group:
@@ -1086,7 +1323,7 @@ with tab_recommend:
                             key=f"pour_{b.id}",
                             use_container_width=True,
                         ):
-                            log_pour(db, current_user, b.id, pour_oz)
+                            log_pour(db, current_user, b.id, pour_oz, vibe=last["vibe"])
                             st.toast(
                                 f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
                                 icon="🥃",

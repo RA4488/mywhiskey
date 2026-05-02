@@ -237,6 +237,70 @@ def log_pour(db: Dict, username: str, bottle_id: str, pour_oz: float) -> None:
     save_db(db)
 
 
+# --- Search & sort helpers ---
+
+def bottle_search_haystack(b: Bottle) -> str:
+    """All searchable text for a bottle, joined into one lowercase string."""
+    parts = [
+        b.name,
+        b.type,
+        b.pick_group,
+        " ".join(b.world_tasting_notes),
+        " ".join(b.my_tasting_notes),
+    ]
+    return " ".join(parts).lower()
+
+
+def filter_and_sort_bottles(
+    bottles: List[Bottle],
+    search_query: str,
+    sort_by: str,
+    show_zero: bool,
+    quick_filters: List[str],
+) -> List[Bottle]:
+    """Apply search, quick filters, out-of-stock toggle, and sort."""
+    result = bottles
+
+    # Quantity-based filter (out of stock)
+    if not show_zero:
+        result = [b for b in result if b.quantity > 0]
+
+    # Quick filters (chips). Stackable — all must match.
+    if "Sealed only" in quick_filters:
+        result = [b for b in result if b.sealed]
+    if "Open only" in quick_filters:
+        result = [b for b in result if not b.sealed]
+    if "Running low" in quick_filters:
+        result = [b for b in result if b.fill_percent < 40 and b.quantity > 0]
+    if "Private picks" in quick_filters:
+        result = [b for b in result if b.private_pick]
+
+    # Search across multiple fields
+    q = search_query.strip().lower()
+    if q:
+        # Split on whitespace; every term must appear somewhere
+        terms = q.split()
+        result = [b for b in result if all(t in bottle_search_haystack(b) for t in terms)]
+
+    # Sort
+    if sort_by == "Name (A–Z)":
+        result = sorted(result, key=lambda b: b.name.lower())
+    elif sort_by == "Recently added":
+        # Bottle IDs are b_<random>; we don't store add-time, so fall back to
+        # reverse insertion order, which is the order they appear in the user's
+        # bottles list. This is a "good enough" approximation.
+        index_map = {b.id: i for i, b in enumerate(bottles)}
+        result = sorted(result, key=lambda b: index_map.get(b.id, 0), reverse=True)
+    elif sort_by == "Fill % (low to high)":
+        result = sorted(result, key=lambda b: (b.quantity <= 0, b.fill_percent))
+    elif sort_by == "Proof (high to low)":
+        result = sorted(result, key=lambda b: (b.proof or 0), reverse=True)
+    elif sort_by == "Sealed first":
+        result = sorted(result, key=lambda b: (not b.sealed, b.name.lower()))
+
+    return result
+
+
 # -----------------------------
 # Vision
 # -----------------------------
@@ -561,15 +625,13 @@ with tab_recommend:
 
 # --- Inventory ---
 with tab_inventory:
+    # Add Bottle redirect button
     if st.button("➕ Add a Bottle", type="primary", use_container_width=True):
-        # Streamlit tabs are buttons in the DOM. Find the one labeled "Add Bottle"
-        # and click it programmatically so the user lands on the right tab.
         st.components.v1.html(
             """
             <script>
             (function() {
                 const doc = window.parent.document;
-                // Tabs are rendered as <button> elements with role="tab".
                 const tabButtons = doc.querySelectorAll('button[role="tab"]');
                 for (const btn of tabButtons) {
                     if (btn.innerText.trim() === 'Add Bottle') {
@@ -586,82 +648,210 @@ with tab_inventory:
 
     if not inventory:
         st.info("No bottles yet.")
+    else:
+        # --- Search bar ---
+        search_query = st.text_input(
+            "🔍 Search",
+            key="inv_search",
+            placeholder="Name, type, notes, pick group… (multiple words supported)",
+            label_visibility="collapsed",
+        )
 
-    show_zero = st.checkbox("Show out-of-stock bottles", value=True)
-    visible = inventory if show_zero else [b for b in inventory if b.quantity > 0]
+        # --- Sort + view-mode + show-zero on one row ---
+        sort_options = [
+            "Name (A–Z)",
+            "Recently added",
+            "Fill % (low to high)",
+            "Proof (high to low)",
+            "Sealed first",
+        ]
+        s_col, v_col, z_col = st.columns([2, 1, 1])
+        sort_by = s_col.selectbox("Sort by", sort_options, key="inv_sort")
+        view_mode = v_col.selectbox("View", ["List", "Cards"], key="inv_view")
+        show_zero = z_col.checkbox("Show 0-qty", value=False, key="inv_show_zero")
 
-    for b in visible:
-        out_of_stock = b.quantity <= 0
-        with st.container(border=True):
-            if out_of_stock:
-                st.markdown(
-                    f"<div class='out-of-stock'><strong>{b.name}</strong> "
-                    f"<em>(out of stock)</em></div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                title = f"**{b.name}**"
-                if b.private_pick and b.pick_group:
-                    title += f" — _{b.pick_group} pick_"
-                st.markdown(title)
+        # --- Quick filter chips ---
+        chip_options = ["Sealed only", "Open only", "Running low", "Private picks"]
+        quick_filters = st.multiselect(
+            "Quick filters",
+            chip_options,
+            default=[],
+            key="inv_chips",
+            label_visibility="collapsed",
+            placeholder="Filters: sealed, open, running low, private picks",
+        )
 
-            st.caption(
-                f"{b.type} · {b.proof}° · "
-                f"{'sealed' if b.sealed else 'open'} · "
-                f"{b.fill_percent:.0f}% full · {b.size_ml} mL"
+        # --- Optional grouping ---
+        group_by_type = st.toggle("Group by type", value=False, key="inv_group_type")
+
+        # --- Apply filters and sort ---
+        visible = filter_and_sort_bottles(
+            inventory, search_query, sort_by, show_zero, quick_filters
+        )
+
+        if not visible:
+            st.info("No bottles match your search/filters.")
+        else:
+            # --- Pagination state ---
+            PAGE_SIZE = 20
+            if "inv_page_size" not in st.session_state:
+                st.session_state.inv_page_size = PAGE_SIZE
+
+            # Reset page size when filters change
+            filter_signature = (
+                search_query,
+                sort_by,
+                view_mode,
+                show_zero,
+                tuple(quick_filters),
+                group_by_type,
             )
+            if st.session_state.get("inv_filter_sig") != filter_signature:
+                st.session_state.inv_filter_sig = filter_signature
+                st.session_state.inv_page_size = PAGE_SIZE
 
-            c1, c2, c3 = st.columns(3)
-            new_qty = c1.number_input(
-                "Quantity", min_value=0, max_value=99,
-                value=int(b.quantity), step=1, key=f"qty_{b.id}",
-            )
-            new_fill = c2.slider(
-                "Fill %", 0, 100, int(b.fill_percent), key=f"fill_{b.id}"
-            )
-            new_sealed = c3.toggle(
-                "Sealed", value=b.sealed, key=f"sealed_{b.id}"
-            )
+            total = len(visible)
+            showing = min(st.session_state.inv_page_size, total)
+            st.caption(f"Showing **{showing}** of **{total}** bottles")
 
-            if b.world_tasting_notes:
-                st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
-            if b.my_tasting_notes:
-                st.caption(f"My notes: {', '.join(b.my_tasting_notes)}")
+            # --- Render helpers ---
 
-            # Quick pour log (only for in-stock bottles)
-            if not out_of_stock:
-                with st.expander("🥃 Log a pour"):
-                    pour_oz = st.radio(
-                        "Pour size (oz)",
-                        options=[0.5, 1.0, 1.5, 2.0],
-                        index=1,
-                        horizontal=True,
-                        key=f"inv_pour_size_{b.id}",
-                        format_func=lambda x: f"{x} oz",
-                    )
-                    if st.button("Log this pour", key=f"inv_pour_{b.id}", type="primary"):
-                        log_pour(db, current_user, b.id, pour_oz)
-                        st.toast(
-                            f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
-                            icon="🥃",
+            def render_bottle_card(b: Bottle):
+                """Full card layout."""
+                out_of_stock = b.quantity <= 0
+                with st.container(border=True):
+                    if out_of_stock:
+                        st.markdown(
+                            f"<div class='out-of-stock'><strong>{b.name}</strong> "
+                            f"<em>(out of stock)</em></div>",
+                            unsafe_allow_html=True,
                         )
+                    else:
+                        title = f"**{b.name}**"
+                        if b.private_pick and b.pick_group:
+                            title += f" — _{b.pick_group} pick_"
+                        st.markdown(title)
+
+                    st.caption(
+                        f"{b.type} · {b.proof}° · "
+                        f"{'sealed' if b.sealed else 'open'} · "
+                        f"{b.fill_percent:.0f}% full · {b.size_ml} mL"
+                    )
+
+                    c1, c2, c3 = st.columns(3)
+                    new_qty = c1.number_input(
+                        "Quantity", min_value=0, max_value=99,
+                        value=int(b.quantity), step=1, key=f"qty_{b.id}",
+                    )
+                    new_fill = c2.slider(
+                        "Fill %", 0, 100, int(b.fill_percent), key=f"fill_{b.id}"
+                    )
+                    new_sealed = c3.toggle(
+                        "Sealed", value=b.sealed, key=f"sealed_{b.id}"
+                    )
+
+                    if b.world_tasting_notes:
+                        st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+                    if b.my_tasting_notes:
+                        st.caption(f"My notes: {', '.join(b.my_tasting_notes)}")
+
+                    if not out_of_stock:
+                        with st.expander("🥃 Log a pour"):
+                            pour_oz = st.radio(
+                                "Pour size (oz)",
+                                options=[0.5, 1.0, 1.5, 2.0],
+                                index=1,
+                                horizontal=True,
+                                key=f"inv_pour_size_{b.id}",
+                                format_func=lambda x: f"{x} oz",
+                            )
+                            if st.button("Log this pour", key=f"inv_pour_{b.id}", type="primary"):
+                                log_pour(db, current_user, b.id, pour_oz)
+                                st.toast(
+                                    f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
+                                    icon="🥃",
+                                )
+                                st.rerun()
+
+                    cols = st.columns(2)
+                    if cols[0].button("Update", key=f"upd_{b.id}"):
+                        for bot in db["users"][current_user]["bottles"]:
+                            if bot["id"] == b.id:
+                                bot["quantity"] = int(new_qty)
+                                bot["fill_percent"] = new_fill
+                                bot["sealed"] = bool(new_sealed)
+                        save_db(db)
+                        st.rerun()
+                    if cols[1].button("Remove", key=f"del_{b.id}"):
+                        db["users"][current_user]["bottles"] = [
+                            x for x in db["users"][current_user]["bottles"] if x["id"] != b.id
+                        ]
+                        save_db(db)
                         st.rerun()
 
-            cols = st.columns(2)
-            if cols[0].button("Update", key=f"upd_{b.id}"):
-                for bot in db["users"][current_user]["bottles"]:
-                    if bot["id"] == b.id:
-                        bot["quantity"] = int(new_qty)
-                        bot["fill_percent"] = new_fill
-                        bot["sealed"] = bool(new_sealed)
-                save_db(db)
-                st.rerun()
-            if cols[1].button("Remove", key=f"del_{b.id}"):
-                db["users"][current_user]["bottles"] = [
-                    x for x in db["users"][current_user]["bottles"] if x["id"] != b.id
-                ]
-                save_db(db)
-                st.rerun()
+            def render_bottle_list_row(b: Bottle):
+                """Compact one-line layout. Tap 'Details' to expand inline."""
+                out_of_stock = b.quantity <= 0
+                line_parts = [f"**{b.name}**"]
+                if b.private_pick and b.pick_group:
+                    line_parts.append(f"_({b.pick_group})_")
+                meta = (
+                    f"{b.type} · {b.proof:.0f}° · {b.fill_percent:.0f}% · "
+                    f"qty {b.quantity} · {'🔒' if b.sealed else '🥃'}"
+                )
+                if out_of_stock:
+                    meta = f"_(out of stock)_ · {meta}"
+
+                c_main, c_action = st.columns([5, 2])
+                c_main.markdown(" ".join(line_parts))
+                c_main.caption(meta)
+                is_open = st.session_state.get(f"row_open_{b.id}", False)
+                if c_action.button(
+                    "Hide" if is_open else "Details",
+                    key=f"toggle_{b.id}",
+                    use_container_width=True,
+                ):
+                    st.session_state[f"row_open_{b.id}"] = not is_open
+                    st.rerun()
+
+                if is_open:
+                    render_bottle_card(b)
+
+            def render_bottle(b: Bottle):
+                if view_mode == "Cards":
+                    render_bottle_card(b)
+                else:
+                    render_bottle_list_row(b)
+
+            # --- Render bottles ---
+            paged = visible[: st.session_state.inv_page_size]
+
+            if group_by_type:
+                seen_types = []
+                type_to_bottles: Dict[str, List[Bottle]] = {}
+                for b in paged:
+                    if b.type not in type_to_bottles:
+                        type_to_bottles[b.type] = []
+                        seen_types.append(b.type)
+                    type_to_bottles[b.type].append(b)
+
+                for t in seen_types:
+                    group = type_to_bottles[t]
+                    with st.expander(f"**{t.title()}** — {len(group)}", expanded=True):
+                        for b in group:
+                            render_bottle(b)
+            else:
+                for b in paged:
+                    render_bottle(b)
+
+            # --- Pagination footer ---
+            if total > st.session_state.inv_page_size:
+                if st.button(
+                    f"Show more ({total - st.session_state.inv_page_size} remaining)",
+                    use_container_width=True,
+                ):
+                    st.session_state.inv_page_size += PAGE_SIZE
+                    st.rerun()
 
 # --- Add Bottle ---
 with tab_add:
@@ -695,8 +885,15 @@ with tab_add:
         st.session_state.camera_open = not st.session_state.camera_open
         st.rerun()
 
+    # Counter lets us remount the file uploader to clear its selection
+    if "uploader_version" not in st.session_state:
+        st.session_state.uploader_version = 0
+
     uploaded = col_upload.file_uploader(
-        "Upload image", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed"
+        "Upload image",
+        type=["jpg", "jpeg", "png", "webp"],
+        label_visibility="collapsed",
+        key=f"bottle_uploader_{st.session_state.uploader_version}",
     )
 
     photo_bytes = None
@@ -822,11 +1019,13 @@ with tab_add:
         value=world_default,
         placeholder="caramel, vanilla, oak (auto-filled when bottle is recognized)",
         help="Commonly known notes — auto-populated by AI when possible.",
+        key="bottle_world_notes",
     )
     my_notes_raw = st.text_input(
         "My Tasting Notes",
         placeholder="What you actually taste",
         help="Your own notes — weighted more heavily in recommendations.",
+        key="bottle_my_notes",
     )
 
     col_save, col_clear = st.columns(2)
@@ -852,7 +1051,15 @@ with tab_add:
                 "size_ml": int(size_ml),
             })
             save_db(db)
+            # Reset the form: drop the AI identification, clear tasting notes,
+            # and bump the uploader key so the file picker remounts (this is the
+            # only reliable way to clear st.file_uploader's selection).
             st.session_state.pop("identified", None)
+            st.session_state.pop("bottle_world_notes", None)
+            st.session_state.pop("bottle_my_notes", None)
+            st.session_state.uploader_version += 1
+            # Also close the camera if it was open
+            st.session_state.camera_open = False
             # Defer the toast and scroll until after the rerun so they fire on a
             # fresh, stable page (avoids the iframe-being-torn-down race).
             st.session_state["just_added_bottle"] = name.strip()
@@ -860,6 +1067,9 @@ with tab_add:
 
     if col_clear.button("Clear photo result"):
         st.session_state.pop("identified", None)
+        st.session_state.pop("bottle_world_notes", None)
+        st.session_state.pop("bottle_my_notes", None)
+        st.session_state.uploader_version += 1
         st.rerun()
 
 # --- Preferences ---

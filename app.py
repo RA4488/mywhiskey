@@ -665,6 +665,23 @@ with tab_inventory:
 
 # --- Add Bottle ---
 with tab_add:
+    # Handle the "just added a bottle" state set by the previous run
+    if "just_added_bottle" in st.session_state:
+        added_name = st.session_state.pop("just_added_bottle")
+        st.toast(
+            f"Success! Less Shelf Space Available — {added_name} added.",
+            icon="🥃",
+        )
+        st.components.v1.html(
+            """
+            <script>
+            // Use instant scroll (not smooth) so it completes before any further reruns
+            window.parent.scrollTo({top: 0, behavior: 'instant'});
+            </script>
+            """,
+            height=0,
+        )
+
     st.write("Take or upload a photo of the bottle, or enter manually.")
 
     if "camera_open" not in st.session_state:
@@ -836,12 +853,9 @@ with tab_add:
             })
             save_db(db)
             st.session_state.pop("identified", None)
-            st.toast(f"Success! Less Shelf Space Available — {name} added.", icon="🥃")
-            # Scroll the parent page (Streamlit runs scripts in an iframe) to the top
-            st.components.v1.html(
-                "<script>window.parent.scrollTo({top: 0, behavior: 'smooth'});</script>",
-                height=0,
-            )
+            # Defer the toast and scroll until after the rerun so they fire on a
+            # fresh, stable page (avoids the iframe-being-torn-down race).
+            st.session_state["just_added_bottle"] = name.strip()
             st.rerun()
 
     if col_clear.button("Clear photo result"):

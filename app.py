@@ -144,7 +144,7 @@ def _load_from_supabase() -> Dict:
     db = {"users": {}, "trades": []}
 
     # Users
-    user_rows = sb.table("users").select("*").execute().data or []
+    user_rows = sb.table("app_users").select("*").execute().data or []
     for u in user_rows:
         db["users"][u["username"]] = {
             "display_name": u.get("display_name", u["username"]),
@@ -187,7 +187,7 @@ def _save_to_supabase(db: Dict) -> None:
             "pour_log": info.get("pour_log") or [],
         })
     if user_payload:
-        sb.table("users").upsert(user_payload, on_conflict="username").execute()
+        sb.table("app_users").upsert(user_payload, on_conflict="username").execute()
 
     # ---- Bottles ----
     # Compute the full set of bottle IDs that should exist across all users,

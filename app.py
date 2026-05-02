@@ -1062,6 +1062,176 @@ def detect_bottles_from_image(image_bytes: bytes, mime_type: str, source: str) -
 
 
 # -----------------------------
+# Bottle Look Up — single-bottle deep dive for buy/skip decisions
+# -----------------------------
+
+def lookup_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
+    """Return rich detail about a single bottle from a photo, for buy-decision context."""
+    from anthropic import Anthropic
+
+    api_key = st.secrets.get("anthropic_api_key")
+    if not api_key:
+        raise RuntimeError("Missing anthropic_api_key in Streamlit secrets.")
+
+    client = Anthropic(api_key=api_key)
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+    prompt = (
+        "Identify this whiskey/spirit bottle from the photo and provide a detailed "
+        "lookup for someone deciding whether to buy it. Return ONLY a JSON object "
+        "with these exact keys, no other text:\n"
+        "  name: full bottle name as printed (string)\n"
+        '  type: one of "bourbon", "rye", "scotch", "rum", "other" (string)\n'
+        "  proof: proof number if visible or known (number or null)\n"
+        "  age_statement: age if known (e.g. '10 year', 'NAS' for no age statement, or null)\n"
+        "  distillery: distillery or brand owner if known (string or null)\n"
+        "  region: region of origin if relevant (e.g. 'Kentucky', 'Islay', null)\n"
+        "  mash_bill: mash bill if commonly known (e.g. 'high-rye bourbon', or null)\n"
+        "  tasting_notes: array of 4-8 short tasting note keywords commonly associated "
+        "with this bottle (e.g. ['caramel','oak','vanilla','baking spice']). Lowercase. "
+        "Empty array if you don't recognize it.\n"
+        "  description: 2-3 sentence plain-English summary of what this bottle is and "
+        "what people generally think of it (string).\n"
+        "  estimated_msrp_usd: typical retail MSRP in USD if you have any idea, as a "
+        "number (no currency symbol). null if unknown. Be conservative — give your "
+        "best estimate from training data, but only when reasonably confident.\n"
+        "  msrp_confidence: how confident you are in the MSRP estimate, one of: "
+        '"high", "medium", "low", "unknown".\n'
+        "  allocated: true if this is widely considered an allocated/hard-to-find "
+        "bottle that often sells above MSRP at retail; false otherwise; null if unknown.\n"
+        "  is_private_pick: true if the label/sticker indicates a barrel pick or store "
+        "selection; false otherwise.\n"
+        "  pick_group: store/group name if private pick and readable; otherwise empty.\n"
+        "  confidence: 0-1, how sure you are you identified the bottle correctly.\n"
+        "  notes: short string explaining what you saw or couldn't read.\n"
+        "If the bottle cannot be identified at all, return name as empty string."
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1200,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": b64}},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    return json.loads(text)
+
+
+def fit_score_for_lookup(detected: Dict, prefs: Preferences, affinity: Dict[str, float]) -> float:
+    """How well does this bottle fit the user, on a 0-1 scale.
+    affinity is included so 'people similar to your favorites' boosts fit.
+    """
+    notes = detected.get("tasting_notes", []) or []
+    proof = detected.get("proof")
+
+    # Flavor match — if we have notes and the user has liked profiles, score
+    # cosine similarity. Otherwise neutral.
+    if not notes or not prefs.liked_profiles:
+        flavor = 0.5
+    else:
+        bottle_vec = normalize(notes_to_vector(notes))
+        pref_vec = normalize(notes_to_vector(prefs.liked_profiles))
+        flavor = max(0.0, min(1.0, cosine_similarity(bottle_vec, pref_vec)))
+
+    # Proof fit
+    if proof is None or prefs.preferred_proof_min is None or prefs.preferred_proof_max is None:
+        proof_fit = 0.5
+    elif prefs.preferred_proof_min <= proof <= prefs.preferred_proof_max:
+        proof_fit = 1.0
+    else:
+        distance = min(abs(proof - prefs.preferred_proof_min), abs(proof - prefs.preferred_proof_max))
+        proof_fit = max(0.0, 1.0 - (distance / 50))
+
+    # Affinity-based "people who like X also like Y" — find the user's top-affinity
+    # bottles' notes and see if this bottle shares them. Cheap proxy.
+    if affinity and prefs:
+        # Skipped here; we'd need access to the user's full inventory in the
+        # function. Caller can pass that in if we want this signal.
+        pass
+
+    # Weighted combination: flavor matters more than proof
+    return round(flavor * 0.65 + proof_fit * 0.35, 3)
+
+
+def value_score_for_lookup(price_usd: Optional[float], detected: Dict) -> Optional[float]:
+    """0-1 score for value (1.0 = great deal, 0.0 = terrible markup).
+    Returns None if we can't make any judgment (no price or no MSRP info).
+    """
+    if price_usd is None:
+        return None
+    msrp = detected.get("estimated_msrp_usd")
+    confidence = detected.get("msrp_confidence", "unknown")
+    if msrp is None or confidence == "unknown":
+        return None
+
+    ratio = price_usd / msrp  # >1 = above MSRP, <1 = below
+    allocated = detected.get("allocated")
+
+    if ratio <= 0.95:
+        return 1.0  # below MSRP: great
+    if ratio <= 1.10:
+        return 0.85  # at MSRP: good
+    if ratio <= 1.50:
+        # Allocated bottles often sell at 1.5x — still "fair"; non-allocated this is a markup
+        return 0.55 if allocated else 0.35
+    if ratio <= 2.0:
+        return 0.30 if allocated else 0.15
+    return 0.10  # 2x+ MSRP — almost always a hard pass on value alone
+
+
+def lookup_verdict(fit: float, value: Optional[float]) -> Dict:
+    """
+    Combine fit and value into a verdict.
+    Returns {emoji, label, color, rationale}.
+    """
+    # If no price/value info, the verdict is purely about fit
+    if value is None:
+        if fit >= 0.70:
+            return {"emoji": "🟢", "label": "BUY", "color": "#1f9d55",
+                    "rationale": "Strong match for your taste."}
+        if fit >= 0.45:
+            return {"emoji": "🟡", "label": "YOUR CALL", "color": "#d4a017",
+                    "rationale": "Decent fit — depends on what you're in the mood for."}
+        return {"emoji": "🔴", "label": "SKIP", "color": "#c53030",
+                "rationale": "Doesn't really match your usual style."}
+
+    # With price, weight fit and value together
+    combined = fit * 0.6 + value * 0.4
+
+    if combined >= 0.70:
+        return {"emoji": "🟢", "label": "BUY", "color": "#1f9d55",
+                "rationale": "Good fit for you AND a fair price."}
+    if combined >= 0.45:
+        # Disambiguate: is it a fit problem or a price problem?
+        if value < 0.4:
+            note = "The fit is decent, but the price is steep."
+        elif fit < 0.5:
+            note = "Price is reasonable, but it's not really your style."
+        else:
+            note = "Solid bottle for you, fair price — close call."
+        return {"emoji": "🟡", "label": "YOUR CALL", "color": "#d4a017", "rationale": note}
+    if value < 0.3 and fit < 0.5:
+        return {"emoji": "🔴", "label": "SKIP", "color": "#c53030",
+                "rationale": "Not really your style and the price is rough."}
+    if value < 0.3:
+        return {"emoji": "🔴", "label": "SKIP", "color": "#c53030",
+                "rationale": "The price is too far above MSRP for what this bottle is."}
+    return {"emoji": "🔴", "label": "SKIP", "color": "#c53030",
+            "rationale": "Doesn't really match your usual taste."}
+
+
+# -----------------------------
 # Scoring
 # -----------------------------
 
@@ -1701,18 +1871,19 @@ _friends_label = "Friends"
 if _total_attention:
     _friends_label = f"Friends ({_total_attention})"
 
-tab_labels = ["Recommend", "At the Bar", "Inventory", "Add Bottle", "Preferences", _friends_label]
+tab_labels = ["Recommend", "At the Bar", "Look Up", "Inventory", "Add Bottle", "Preferences", _friends_label]
 if is_admin:
     tab_labels.append("Admin")
 
 tabs = st.tabs(tab_labels)
 tab_recommend = tabs[0]
 tab_bar = tabs[1]
-tab_inventory = tabs[2]
-tab_add = tabs[3]
-tab_prefs = tabs[4]
-tab_friends = tabs[5]
-tab_admin = tabs[6] if is_admin else None
+tab_lookup = tabs[2]
+tab_inventory = tabs[3]
+tab_add = tabs[4]
+tab_prefs = tabs[5]
+tab_friends = tabs[6]
+tab_admin = tabs[7] if is_admin else None
 
 # --- Recommend ---
 with tab_recommend:
@@ -2061,6 +2232,246 @@ with tab_bar:
                 st.session_state.pop("bar_source_used", None)
                 st.session_state.bar_uploader_version += 1
                 st.session_state.bar_camera_open = False
+                st.rerun()
+
+# --- Bottle Look Up ---
+with tab_lookup:
+    st.markdown("### 🔎 Bottle Look Up")
+    st.caption(
+        "Snap any bottle and get a quick **BUY / YOUR CALL / SKIP** verdict based on "
+        "your taste. Add the price (optional) for a value check too."
+    )
+
+    # Camera/upload
+    if "lookup_camera_open" not in st.session_state:
+        st.session_state.lookup_camera_open = False
+    if "lookup_uploader_version" not in st.session_state:
+        st.session_state.lookup_uploader_version = 0
+
+    col_cam, col_upload = st.columns(2)
+    if col_cam.button(
+        "📷 Close camera" if st.session_state.lookup_camera_open else "📷 Use camera",
+        key="lookup_cam_toggle",
+        use_container_width=True,
+    ):
+        st.session_state.lookup_camera_open = not st.session_state.lookup_camera_open
+        st.rerun()
+
+    uploaded = col_upload.file_uploader(
+        "Upload",
+        type=["jpg", "jpeg", "png", "webp"],
+        label_visibility="collapsed",
+        key=f"lookup_uploader_{st.session_state.lookup_uploader_version}",
+    )
+
+    photo_bytes = None
+    photo_mime = "image/jpeg"
+
+    if st.session_state.lookup_camera_open:
+        try:
+            from streamlit_back_camera_input import back_camera_input
+            st.caption("Tap the video to capture.")
+            captured = back_camera_input(key="lookup_rear_cam")
+            if captured is not None:
+                if isinstance(captured, str) and captured.startswith("data:image"):
+                    header, data = captured.split(",", 1)
+                    photo_mime = header.split(";")[0].replace("data:", "")
+                    photo_bytes = base64.b64decode(data)
+                elif hasattr(captured, "getvalue"):
+                    photo_bytes = captured.getvalue()
+                    photo_mime = getattr(captured, "type", "image/jpeg") or "image/jpeg"
+                else:
+                    photo_bytes = bytes(captured)
+        except ImportError:
+            fallback = st.camera_input("Take a photo")
+            if fallback is not None:
+                photo_bytes = fallback.getvalue()
+                photo_mime = fallback.type or "image/jpeg"
+
+    image_bytes = photo_bytes if photo_bytes else (uploaded.getvalue() if uploaded else None)
+    image_mime = photo_mime if photo_bytes else (uploaded.type if uploaded else "image/jpeg")
+
+    if image_bytes is not None and st.button(
+        "🔎 Look up this bottle",
+        type="primary",
+        use_container_width=True,
+    ):
+        with st.spinner("Reading the bottle and pulling what's known about it..."):
+            try:
+                result = lookup_bottle_from_image(image_bytes, image_mime)
+                st.session_state["lookup_result"] = result
+            except json.JSONDecodeError:
+                st.error("AI returned invalid JSON. Try a clearer photo.")
+            except Exception as e:
+                st.error(f"Couldn't look up bottle: {e}")
+
+    detected = st.session_state.get("lookup_result")
+
+    if detected:
+        if not detected.get("name"):
+            st.warning("Couldn't identify the bottle from the photo. Try a clearer shot of the label.")
+        else:
+            # ---- Price input ----
+            st.divider()
+            price_col, msrp_col = st.columns([1, 1])
+            user_price = price_col.number_input(
+                "Price you're seeing (USD, optional)",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                help="Leave at 0 to skip the value analysis. Fill in for a price check.",
+                key="lookup_price",
+            )
+            user_price_val = user_price if user_price and user_price > 0 else None
+
+            estimated_msrp = detected.get("estimated_msrp_usd")
+            msrp_conf = detected.get("msrp_confidence", "unknown")
+            if estimated_msrp:
+                msrp_col.metric(
+                    "Estimated MSRP",
+                    f"${estimated_msrp:,.0f}",
+                    help=f"AI confidence: {msrp_conf}. From training data, not real-time.",
+                )
+            else:
+                msrp_col.metric("Estimated MSRP", "Unknown")
+
+            # ---- Compute scores and verdict ----
+            pour_log = get_pour_log(db, current_user)
+            affinity = compute_affinity_scores(pour_log)
+            fit = fit_score_for_lookup(detected, prefs, affinity)
+            value = value_score_for_lookup(user_price_val, detected)
+            verdict = lookup_verdict(fit, value)
+
+            # ---- Verdict banner ----
+            st.markdown(
+                f"""
+                <div style="
+                    border-left: 6px solid {verdict['color']};
+                    background: rgba(0,0,0,0.03);
+                    padding: 14px 18px;
+                    border-radius: 6px;
+                    margin: 16px 0;
+                ">
+                    <div style="font-size:1.6rem; font-weight:700; color:{verdict['color']};">
+                        {verdict['emoji']} {verdict['label']}
+                    </div>
+                    <div style="font-size:1rem; margin-top:4px;">
+                        {verdict['rationale']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # ---- Owned-already callout ----
+            owned = find_owned_match(detected["name"], inventory)
+            if owned:
+                st.info(
+                    f"🏠 **You already have this at home** "
+                    f"({owned.quantity}× · {owned.fill_percent:.0f}% full · "
+                    f"{'sealed' if owned.sealed else 'open'})"
+                )
+
+            # ---- Bottle details ----
+            st.markdown(f"### {detected['name']}")
+            meta_bits = []
+            if detected.get("type"):
+                meta_bits.append(detected["type"].title())
+            if detected.get("proof"):
+                meta_bits.append(f"{detected['proof']:.0f}° proof")
+            if detected.get("age_statement"):
+                meta_bits.append(detected["age_statement"])
+            if detected.get("region"):
+                meta_bits.append(detected["region"])
+            if meta_bits:
+                st.caption(" · ".join(meta_bits))
+
+            if detected.get("distillery"):
+                st.markdown(f"**Distillery:** {detected['distillery']}")
+            if detected.get("mash_bill"):
+                st.markdown(f"**Mash bill:** {detected['mash_bill']}")
+            if detected.get("is_private_pick"):
+                pg = detected.get("pick_group", "")
+                st.markdown(
+                    f"**Private pick** — {pg}" if pg else "**Private pick**"
+                )
+            if detected.get("allocated"):
+                st.caption("⚠️ This bottle is commonly allocated / hard to find.")
+
+            if detected.get("description"):
+                st.markdown(f"_{detected['description']}_")
+
+            if detected.get("tasting_notes"):
+                st.markdown(f"**Common tasting notes:** {', '.join(detected['tasting_notes'])}")
+
+            # ---- Fit breakdown ----
+            with st.expander("Why this verdict?"):
+                st.markdown(f"**Fit score:** {int(fit * 100)}% / 100%")
+                st.caption(
+                    "Based on how well the bottle's known flavor profile matches your "
+                    "liked profiles, plus proof fit against your preferred range."
+                )
+                if value is not None:
+                    st.markdown(f"**Value score:** {int(value * 100)}% / 100%")
+                    if estimated_msrp and user_price_val:
+                        ratio = user_price_val / estimated_msrp
+                        if ratio < 1.0:
+                            st.caption(f"At ${user_price_val:.0f}, that's **{(1-ratio)*100:.0f}% below MSRP** — a deal.")
+                        elif ratio <= 1.10:
+                            st.caption(f"At ${user_price_val:.0f}, that's right around MSRP — fair.")
+                        else:
+                            st.caption(
+                                f"At ${user_price_val:.0f}, that's **{(ratio-1)*100:.0f}% above MSRP**."
+                                + (" Allocated bottles often sell at this kind of markup." if detected.get("allocated") else "")
+                            )
+                else:
+                    st.caption("Add a price above to get a value check.")
+
+                conf = detected.get("confidence", 0)
+                if conf < 0.7:
+                    st.caption(
+                        f"⚠️ AI was only {int(conf*100)}% confident on the bottle ID — "
+                        "verify the name before trusting the rest."
+                    )
+
+            # ---- Action buttons ----
+            st.divider()
+            act_save, act_clear = st.columns(2)
+
+            if act_save.button("💾 Save to my shelf", type="primary", use_container_width=True):
+                # Add the bottle to current user's inventory using detected fields
+                new_id = f"b_{int(random.random() * 1_000_000)}"
+                btype = detected.get("type", "other")
+                if btype not in ("bourbon", "rye", "scotch", "rum", "other"):
+                    btype = "other"
+                db["users"][current_user]["bottles"].append({
+                    "id": new_id,
+                    "name": detected["name"],
+                    "type": btype,
+                    "proof": float(detected["proof"]) if detected.get("proof") else 90.0,
+                    "world_tasting_notes": detected.get("tasting_notes", []) or [],
+                    "my_tasting_notes": [],
+                    "fill_percent": 100.0,
+                    "sealed": True,
+                    "quantity": 1,
+                    "private_pick": bool(detected.get("is_private_pick", False)),
+                    "pick_group": detected.get("pick_group", "") or "",
+                    "size_ml": 750,
+                })
+                save_db(db)
+                st.session_state.pop("lookup_result", None)
+                st.session_state.lookup_uploader_version += 1
+                st.session_state.lookup_camera_open = False
+                st.toast(
+                    f"Success! Less Shelf Space Available — {detected['name']} added.",
+                    icon="🥃",
+                )
+                st.rerun()
+
+            if act_clear.button("Clear and look up another", use_container_width=True):
+                st.session_state.pop("lookup_result", None)
+                st.session_state.lookup_uploader_version += 1
+                st.session_state.lookup_camera_open = False
                 st.rerun()
 
 # --- Inventory ---

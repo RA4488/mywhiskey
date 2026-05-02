@@ -1,13 +1,18 @@
 """
-Whiskey Recommendation App - Streamlit version
+Whiskey Recommendation App - Streamlit version with photo bottle entry
 Run locally:   streamlit run app.py
 Deploy free:   push to GitHub -> share.streamlit.io
+
+Secrets needed (Streamlit Cloud Settings -> Secrets):
+    password = "your-shared-password"
+    anthropic_api_key = "sk-ant-..."
 """
 
+import base64
 import json
 import math
 import random
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -39,7 +44,7 @@ class Preferences:
 
 
 # -----------------------------
-# Persistence (simple JSON file)
+# Persistence
 # -----------------------------
 
 DATA_FILE = Path("data.json")
@@ -72,7 +77,68 @@ def prefs_from_data(data: Dict) -> Preferences:
 
 
 # -----------------------------
-# Scoring (from original code)
+# Vision: identify bottle from photo
+# -----------------------------
+
+def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
+    """Send image to Claude and get structured bottle info back."""
+    from anthropic import Anthropic
+
+    api_key = st.secrets.get("anthropic_api_key")
+    if not api_key:
+        raise RuntimeError(
+            "Missing anthropic_api_key in Streamlit secrets. "
+            "Add it under Settings -> Secrets."
+        )
+
+    client = Anthropic(api_key=api_key)
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+    prompt = (
+        "Identify this whiskey/spirit bottle from the photo. "
+        "Return ONLY a JSON object with these exact keys, no other text:\n"
+        "  name: full bottle name as printed (string)\n"
+        '  type: one of "bourbon", "rye", "scotch", "rum", "other" (string)\n'
+        "  proof: proof number if visible or known (number or null)\n"
+        "  confidence: your confidence 0-1 that you identified it correctly (number)\n"
+        "  notes: short string explaining what you see, or what you couldn't read\n"
+        "If you cannot identify the bottle at all, return name as empty string."
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=500,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    )
+
+    text = response.content[0].text.strip()
+    # Strip markdown fences if Claude added them
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    return json.loads(text)
+
+
+# -----------------------------
+# Scoring
 # -----------------------------
 
 FLAVOR_DIMENSIONS = [
@@ -81,12 +147,12 @@ FLAVOR_DIMENSIONS = [
 ]
 
 
-def normalize(vec: List[float]) -> List[float]:
+def normalize(vec):
     norm = math.sqrt(sum(v * v for v in vec))
     return [v / norm for v in vec] if norm else vec
 
 
-def notes_to_vector(notes: List[str]) -> List[float]:
+def notes_to_vector(notes):
     vector = [0.0] * len(FLAVOR_DIMENSIONS)
     for note in notes:
         for i, dim in enumerate(FLAVOR_DIMENSIONS):
@@ -184,13 +250,12 @@ def recommend_bottles(inventory, prefs, mode, recent_ids, top_n=3):
 
 
 # -----------------------------
-# Streamlit UI
+# UI
 # -----------------------------
 
 st.set_page_config(page_title="What Should I Pour?", page_icon="🥃", layout="centered")
 
-# Simple shared-password gate (optional - delete this block to make public)
-PASSWORD = st.secrets.get("password", "letmein")  # set in Streamlit Cloud secrets
+PASSWORD = st.secrets.get("password", "letmein")
 if "auth" not in st.session_state:
     st.session_state.auth = False
 if not st.session_state.auth:
@@ -203,7 +268,6 @@ if not st.session_state.auth:
             st.error("Wrong password")
     st.stop()
 
-# Load data
 data = load_data()
 inventory = bottles_from_data(data)
 prefs = prefs_from_data(data)
@@ -242,8 +306,7 @@ with tab_recommend:
                     st.write(f"**Why:** {r['reason']}")
                     st.write(f"**Notes:** {', '.join(b.tasting_notes)}")
                     st.write(f"Score: `{r['score']}`")
-                    if st.button(f"I poured this 🥃", key=f"pour_{b.id}"):
-                        # Mark recent + drop fill a bit
+                    if st.button("I poured this 🥃", key=f"pour_{b.id}"):
                         recent_ids = ([b.id] + recent_ids)[:10]
                         for bot in data["bottles"]:
                             if bot["id"] == b.id:
@@ -285,18 +348,60 @@ with tab_inventory:
 
 # --- Add Bottle Tab ---
 with tab_add:
-    name = st.text_input("Name", placeholder="Eagle Rare 10")
-    btype = st.selectbox("Type", ["bourbon", "rye", "scotch", "rum", "other"])
-    proof = st.number_input("Proof", 80.0, 160.0, 90.0, step=0.1)
+    st.write("Take or upload a photo of the bottle, or enter manually.")
+
+    photo = st.camera_input("Take a photo")
+    uploaded = st.file_uploader("...or upload an image", type=["jpg", "jpeg", "png", "webp"])
+
+    image_source = photo or uploaded
+
+    if image_source is not None and st.button("Identify bottle from photo", type="primary"):
+        with st.spinner("Reading the label..."):
+            try:
+                mime = image_source.type or "image/jpeg"
+                result = identify_bottle_from_image(image_source.getvalue(), mime)
+                st.session_state["identified"] = result
+            except json.JSONDecodeError:
+                st.error("Claude returned something that wasn't valid JSON. Try another photo or enter manually.")
+            except Exception as e:
+                st.error(f"Couldn't identify bottle: {e}")
+
+    identified = st.session_state.get("identified", {})
+
+    if identified:
+        conf = identified.get("confidence", 0)
+        if conf >= 0.7:
+            st.success(f"Identified with {int(conf * 100)}% confidence — review and save.")
+        elif conf >= 0.4:
+            st.warning(f"Best guess ({int(conf * 100)}% confidence) — please verify the details.")
+        else:
+            st.error(f"Low confidence ({int(conf * 100)}%) — most fields may be wrong, edit carefully.")
+        if identified.get("notes"):
+            st.caption(f"_{identified['notes']}_")
+
+    st.divider()
+    st.write("**Confirm details**")
+
+    type_options = ["bourbon", "rye", "scotch", "rum", "other"]
+    default_type = identified.get("type", "bourbon")
+    if default_type not in type_options:
+        default_type = "other"
+
+    name = st.text_input("Name", value=identified.get("name", ""))
+    btype = st.selectbox("Type", type_options, index=type_options.index(default_type))
+    default_proof = identified.get("proof") or 90.0
+    proof = st.number_input("Proof", 80.0, 160.0, float(default_proof), step=0.1)
     notes_raw = st.text_input(
         "Tasting notes (comma-separated)",
         placeholder="caramel, vanilla, oak",
+        help="You'll get better recommendations if you fill these in.",
     )
     fill = st.slider("Fill %", 0, 100, 100)
     opened = st.checkbox("Already opened?", value=False)
     store_pick = st.checkbox("Store pick?", value=False)
 
-    if st.button("Add bottle", type="primary"):
+    col_save, col_clear = st.columns(2)
+    if col_save.button("Save bottle", type="primary"):
         if not name.strip():
             st.error("Name required.")
         else:
@@ -312,8 +417,13 @@ with tab_add:
                 "store_pick": store_pick,
             })
             save_data(data)
+            st.session_state.pop("identified", None)
             st.success(f"Added {name}.")
             st.rerun()
+
+    if col_clear.button("Clear photo result"):
+        st.session_state.pop("identified", None)
+        st.rerun()
 
 # --- Preferences Tab ---
 with tab_prefs:

@@ -39,6 +39,7 @@ class Bottle:
     quantity: int
     private_pick: bool = False
     pick_group: str = ""
+    size_ml: int = 750
 
 
 @dataclass
@@ -160,6 +161,7 @@ def normalize_bottle_record(b: Dict) -> Dict:
     if "sealed" not in b:
         b["sealed"] = not b.get("opened", False)
     b.setdefault("fill_percent", 100.0)
+    b.setdefault("size_ml", 750)
     return b
 
 
@@ -181,6 +183,7 @@ def get_user_bottles(db: Dict, username: str) -> List[Bottle]:
             quantity=nb["quantity"],
             private_pick=nb["private_pick"],
             pick_group=nb["pick_group"],
+            size_ml=nb["size_ml"],
         ))
     return bottles
 
@@ -203,6 +206,35 @@ def list_other_users(db: Dict, current_user: str) -> List[str]:
         for key, info in db["users"].items()
         if key != current_key
     )
+
+
+# 1 mL = 0.033814 fl oz
+ML_PER_OZ = 29.5735
+
+
+def pour_to_fill_drop(pour_oz: float, size_ml: int) -> float:
+    """Convert a pour in ounces to a fill-percent drop for a bottle of a given size."""
+    if size_ml <= 0:
+        return 0.0
+    pour_ml = pour_oz * ML_PER_OZ
+    return (pour_ml / size_ml) * 100
+
+
+def log_pour(db: Dict, username: str, bottle_id: str, pour_oz: float) -> None:
+    """Apply a pour: drop fill, mark unsealed, push to recent_ids."""
+    user_key = normalize_username(username)
+    user_record = db["users"][user_key]
+    recent_ids = user_record.get("recent_ids", [])
+    recent_ids = ([bottle_id] + [x for x in recent_ids if x != bottle_id])[:10]
+    for bot in user_record["bottles"]:
+        if bot["id"] == bottle_id:
+            size_ml = bot.get("size_ml", 750)
+            drop = pour_to_fill_drop(pour_oz, size_ml)
+            bot["sealed"] = False
+            bot["fill_percent"] = max(0, bot["fill_percent"] - drop)
+            break
+    user_record["recent_ids"] = recent_ids
+    save_db(db)
 
 
 # -----------------------------
@@ -513,19 +545,45 @@ with tab_recommend:
                         st.write(f"**Your notes:** {', '.join(b.my_tasting_notes)}")
                     if b.world_tasting_notes:
                         st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+                    # Pour size selector + log button
+                    pour_oz = st.radio(
+                        "Pour size (oz)",
+                        options=[0.5, 1.0, 1.5, 2.0],
+                        index=1,
+                        horizontal=True,
+                        key=f"pour_size_{b.id}",
+                        format_func=lambda x: f"{x} oz",
+                    )
                     if st.button("I poured this 🥃", key=f"pour_{b.id}"):
-                        recent_ids = ([b.id] + recent_ids)[:10]
-                        for bot in db["users"][current_user]["bottles"]:
-                            if bot["id"] == b.id:
-                                bot["sealed"] = False
-                                bot["fill_percent"] = max(0, bot["fill_percent"] - 5)
-                        db["users"][current_user]["recent_ids"] = recent_ids
-                        save_db(db)
-                        st.success(f"Logged {b.name}. Cheers.")
+                        log_pour(db, current_user, b.id, pour_oz)
+                        st.toast(f"Logged a {pour_oz} oz pour of {b.name}. Cheers.", icon="🥃")
                         st.rerun()
 
 # --- Inventory ---
 with tab_inventory:
+    if st.button("➕ Add a Bottle", type="primary", use_container_width=True):
+        # Streamlit tabs are buttons in the DOM. Find the one labeled "Add Bottle"
+        # and click it programmatically so the user lands on the right tab.
+        st.components.v1.html(
+            """
+            <script>
+            (function() {
+                const doc = window.parent.document;
+                // Tabs are rendered as <button> elements with role="tab".
+                const tabButtons = doc.querySelectorAll('button[role="tab"]');
+                for (const btn of tabButtons) {
+                    if (btn.innerText.trim() === 'Add Bottle') {
+                        btn.click();
+                        window.parent.scrollTo({top: 0, behavior: 'smooth'});
+                        break;
+                    }
+                }
+            })();
+            </script>
+            """,
+            height=0,
+        )
+
     if not inventory:
         st.info("No bottles yet.")
 
@@ -550,7 +608,7 @@ with tab_inventory:
             st.caption(
                 f"{b.type} · {b.proof}° · "
                 f"{'sealed' if b.sealed else 'open'} · "
-                f"{b.fill_percent:.0f}% full"
+                f"{b.fill_percent:.0f}% full · {b.size_ml} mL"
             )
 
             c1, c2, c3 = st.columns(3)
@@ -569,6 +627,25 @@ with tab_inventory:
                 st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
             if b.my_tasting_notes:
                 st.caption(f"My notes: {', '.join(b.my_tasting_notes)}")
+
+            # Quick pour log (only for in-stock bottles)
+            if not out_of_stock:
+                with st.expander("🥃 Log a pour"):
+                    pour_oz = st.radio(
+                        "Pour size (oz)",
+                        options=[0.5, 1.0, 1.5, 2.0],
+                        index=1,
+                        horizontal=True,
+                        key=f"inv_pour_size_{b.id}",
+                        format_func=lambda x: f"{x} oz",
+                    )
+                    if st.button("Log this pour", key=f"inv_pour_{b.id}", type="primary"):
+                        log_pour(db, current_user, b.id, pour_oz)
+                        st.toast(
+                            f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
+                            icon="🥃",
+                        )
+                        st.rerun()
 
             cols = st.columns(2)
             if cols[0].button("Update", key=f"upd_{b.id}"):
@@ -670,6 +747,22 @@ with tab_add:
     btype = st.selectbox("Type", type_options, index=type_options.index(default_type))
     default_proof = identified.get("proof") or 90.0
     proof = st.number_input("Proof", 80.0, 160.0, float(default_proof), step=0.1)
+
+    size_options = [375, 500, 700, 750, 1000, 1750]
+    size_ml = st.selectbox(
+        "Bottle size",
+        options=size_options,
+        index=size_options.index(750),
+        format_func=lambda ml: (
+            f"{ml} mL"
+            + ("  (375 — half)" if ml == 375 else "")
+            + ("  (500 — European)" if ml == 500 else "")
+            + ("  (700 — UK/EU)" if ml == 700 else "")
+            + ("  (750 — standard US)" if ml == 750 else "")
+            + ("  (1 L)" if ml == 1000 else "")
+            + ("  (1.75 L — handle)" if ml == 1750 else "")
+        ),
+    )
     quantity = st.number_input("Quantity", min_value=1, max_value=99, value=1, step=1)
 
     # Sealed toggle: default to sealed (True) unless vision detected otherwise
@@ -739,6 +832,7 @@ with tab_add:
                 "quantity": int(quantity),
                 "private_pick": bool(private_pick),
                 "pick_group": pick_group.strip(),
+                "size_ml": int(size_ml),
             })
             save_db(db)
             st.session_state.pop("identified", None)

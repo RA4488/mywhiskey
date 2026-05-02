@@ -445,35 +445,195 @@ def build_reason(bottle, prefs):
     return ", ".join(reasons) if reasons else "good match overall"
 
 
-def recommend_bottles(inventory, prefs, mode, recent_ids, top_n=3):
-    # Always exclude bottles with quantity 0 from recommendations
+VIBES = {
+    "Just a regular pour": {
+        "blurb": "Something I'd reach for on any given evening.",
+        "weights": {"flavor": 0.35, "proof": 0.15, "fill": 0.20, "opened": 0.15, "novelty": 0.15},
+        "filters": {"opened_or_low": True},
+    },
+    "Easy sipper before bed": {
+        "blurb": "Lower proof, smooth, doesn't ask much of me.",
+        "weights": {"flavor": 0.30, "low_proof": 0.30, "fill": 0.15, "opened": 0.15, "novelty": 0.10},
+        "filters": {"opened_or_low": True, "max_proof": 105},
+    },
+    "Sharing with company": {
+        "blurb": "Crowd-pleaser. Probably not my weirdest bottle.",
+        "weights": {"flavor": 0.20, "proof": 0.10, "fill": 0.15, "opened": 0.20, "novelty": 0.10, "crowd": 0.25},
+        "filters": {"opened_or_low": True},
+    },
+    "Want to focus and taste": {
+        "blurb": "Something interesting, worth paying attention to.",
+        "weights": {"flavor": 0.30, "proof": 0.15, "fill": 0.10, "interesting": 0.30, "novelty": 0.15},
+        "filters": {"opened_or_low": True},
+    },
+    "Surprise me": {
+        "blurb": "Roll the dice — pick something random.",
+        "weights": {},  # ignored, uses random
+        "filters": {"opened_or_low": True},
+        "random": True,
+    },
+}
+
+
+def crowd_score(bottle: Bottle) -> float:
+    """Higher when bottle is approachable: lower proof, multiple bottles, not a private pick."""
+    score = 0.5
+    if bottle.proof and bottle.proof <= 100:
+        score += 0.25
+    if bottle.quantity > 1:
+        score += 0.15  # if you have multiples, you don't mind sharing
+    if bottle.private_pick:
+        score -= 0.20  # private picks are usually saved
+    return max(0.0, min(1.0, score))
+
+
+def interesting_score(bottle: Bottle) -> float:
+    """Higher for bottles that reward attention: private picks, higher proof, rich notes."""
+    score = 0.4
+    if bottle.private_pick:
+        score += 0.30
+    if bottle.proof and bottle.proof >= 110:
+        score += 0.20
+    note_count = len(bottle.world_tasting_notes) + len(bottle.my_tasting_notes)
+    if note_count >= 4:
+        score += 0.10
+    return max(0.0, min(1.0, score))
+
+
+def low_proof_score(bottle: Bottle) -> float:
+    """Higher for lower-proof bottles. Peaks around 90 proof, drops above 105."""
+    if bottle.proof is None:
+        return 0.5
+    if bottle.proof <= 90:
+        return 1.0
+    if bottle.proof <= 105:
+        return 0.7
+    if bottle.proof <= 115:
+        return 0.3
+    return 0.1
+
+
+def recommend_bottles(
+    inventory: List[Bottle],
+    prefs: Preferences,
+    vibe: str,
+    recent_ids: List[str],
+    top_n: int = 3,
+    people_count: int = 1,
+) -> List[Dict]:
+    """Vibe-driven recommendation. people_count adjusts share-friendliness."""
+    vibe_config = VIBES.get(vibe, VIBES["Just a regular pour"])
+    filters = vibe_config["filters"]
+    weights = vibe_config["weights"]
+
+    # Always exclude empty bottles
     candidates = [b for b in inventory if b.quantity > 0]
-    if mode != "special":
-        candidates = [b for b in candidates if not b.sealed or b.fill_percent < 50]
-    if mode == "preservation":
-        candidates = [b for b in candidates if b.fill_percent < 40]
+
+    # Apply vibe filters
+    if filters.get("opened_or_low"):
+        opened_or_low = [b for b in candidates if not b.sealed or b.fill_percent < 50]
+        if opened_or_low:
+            candidates = opened_or_low
+    if "max_proof" in filters:
+        within = [b for b in candidates if not b.proof or b.proof <= filters["max_proof"]]
+        if within:
+            candidates = within
+
     if not candidates:
         candidates = [b for b in inventory if b.quantity > 0]
 
+    # If sharing with multiple people, bias toward share-friendly bottles
+    sharing_boost = people_count >= 2
+
     scored = []
     for bottle in candidates:
-        f = flavor_score(bottle, prefs)
-        p = proof_score(bottle, prefs)
-        fi = fill_score(bottle)
-        o = opened_score(bottle)
-        n = novelty_score(bottle, recent_ids)
-
-        if mode == "random":
+        if vibe_config.get("random"):
             total = random.random()
-        elif mode == "special":
-            total = (p * 0.3) + (f * 0.3) + (1 - fi) * 0.4
         else:
-            total = f * 0.4 + p * 0.2 + fi * 0.2 + o * 0.1 + n * 0.1
+            f = flavor_score(bottle, prefs)
+            p = proof_score(bottle, prefs)
+            lp = low_proof_score(bottle)
+            fi = fill_score(bottle)
+            o = opened_score(bottle)
+            n = novelty_score(bottle, recent_ids)
+            c = crowd_score(bottle)
+            i = interesting_score(bottle)
+
+            total = (
+                weights.get("flavor", 0) * f
+                + weights.get("proof", 0) * p
+                + weights.get("low_proof", 0) * lp
+                + weights.get("fill", 0) * fi
+                + weights.get("opened", 0) * o
+                + weights.get("novelty", 0) * n
+                + weights.get("crowd", 0) * c
+                + weights.get("interesting", 0) * i
+            )
+            if sharing_boost:
+                total += 0.10 * c  # extra nudge toward crowd-pleasers
 
         scored.append((bottle, total))
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [{"bottle": b, "score": round(s, 3), "reason": build_reason(b, prefs)} for b, s in scored[:top_n]]
+    return [
+        {
+            "bottle": b,
+            "score": round(s, 3),
+            "reason": build_natural_reason(b, prefs, vibe, recent_ids),
+        }
+        for b, s in scored[:top_n]
+    ]
+
+
+def build_natural_reason(bottle: Bottle, prefs: Preferences, vibe: str, recent_ids: List[str]) -> str:
+    """Generate a friendly, conversational reason this bottle fits the vibe."""
+    bits = []
+
+    # Vibe-specific framing
+    if vibe == "Easy sipper before bed":
+        if bottle.proof and bottle.proof <= 95:
+            bits.append("gentle proof for a wind-down")
+        elif bottle.proof and bottle.proof <= 105:
+            bits.append("approachable enough for a nightcap")
+    elif vibe == "Sharing with company":
+        if bottle.quantity > 1:
+            bits.append(f"you've got {bottle.quantity} of these")
+        if bottle.proof and bottle.proof <= 100:
+            bits.append("crowd-friendly proof")
+        if not bottle.private_pick:
+            bits.append("a solid pour for guests")
+    elif vibe == "Want to focus and taste":
+        if bottle.private_pick and bottle.pick_group:
+            bits.append(f"a {bottle.pick_group} pick worth attention")
+        elif bottle.private_pick:
+            bits.append("a private pick worth slowing down for")
+        if bottle.proof and bottle.proof >= 110:
+            bits.append("higher proof rewards a careful sip")
+    elif vibe == "Just a regular pour":
+        if not bottle.sealed:
+            bits.append("already open and ready")
+
+    # Cross-vibe reasons
+    if bottle.fill_percent < 30:
+        bits.append("getting low — drink it before it dies")
+    elif bottle.fill_percent < 50:
+        bits.append("about half left")
+
+    all_notes = bottle.world_tasting_notes + bottle.my_tasting_notes
+    matching_notes = [n for n in all_notes if n in prefs.liked_profiles]
+    if matching_notes:
+        bits.append(f"notes you like: {', '.join(matching_notes[:3])}")
+
+    if bottle.id not in recent_ids and bottle.fill_percent < 95:
+        # haven't poured this lately
+        pass  # avoid every result saying "haven't had this lately"
+
+    if not bits:
+        bits.append("a good fit for what you're after")
+
+    # Capitalize first letter, join with semicolons for visual rhythm
+    reason = "; ".join(bits)
+    return reason[0].upper() + reason[1:] if reason else reason
 
 
 # -----------------------------
@@ -507,27 +667,69 @@ if "user" not in st.session_state:
 
 # --- Auth screens ---
 if st.session_state.user is None:
-    st.title("🥃 What Should I Pour?")
+    # --- Hero ---
+    st.markdown(
+        """
+        <div style="text-align: center; padding: 1.5rem 0 0.5rem 0;">
+            <div style="font-size: 4rem; line-height: 1;">🥃</div>
+            <h1 style="margin: 0.5rem 0 0.25rem 0; font-size: 2rem;">
+                What Should I Pour?
+            </h1>
+            <p style="color: #888; margin: 0; font-size: 1.05rem;">
+                Your personal whiskey shelf — smarter pours, less guesswork.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    auth_tab_login, auth_tab_signup = st.tabs(["Sign in", "Create account"])
+    # --- Three-up "what you get" pitch ---
+    feat_col1, feat_col2, feat_col3 = st.columns(3)
+    with feat_col1:
+        st.markdown(
+            "<div style='text-align:center; padding: 0.5rem 0;'>"
+            "<div style='font-size:1.6rem;'>📷</div>"
+            "<div style='font-size:0.85rem; color:#aaa;'>Snap to add a bottle</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with feat_col2:
+        st.markdown(
+            "<div style='text-align:center; padding: 0.5rem 0;'>"
+            "<div style='font-size:1.6rem;'>✨</div>"
+            "<div style='font-size:0.85rem; color:#aaa;'>Pick by mood, not menu</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with feat_col3:
+        st.markdown(
+            "<div style='text-align:center; padding: 0.5rem 0;'>"
+            "<div style='font-size:1.6rem;'>🧊</div>"
+            "<div style='font-size:0.85rem; color:#aaa;'>Track every pour</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
-    with auth_tab_login:
-        u = st.text_input("Username", key="login_user")
-        p = st.text_input("Password", type="password", key="login_pw")
-        if st.button("Sign in", type="primary"):
-            if verify_user(db, u, p):
-                st.session_state.user = normalize_username(u)
-                st.rerun()
-            else:
-                st.error("Wrong username or password.")
+    st.divider()
 
-    with auth_tab_signup:
-        st.caption("You need an invite code to sign up. Ask whoever set this up for you.")
-        new_u = st.text_input("Pick a username", key="signup_user")
-        new_p = st.text_input("Pick a password", type="password", key="signup_pw")
+    # --- Signup is the default mode ---
+    if "auth_view" not in st.session_state:
+        st.session_state.auth_view = "signup"
+
+    if st.session_state.auth_view == "signup":
+        st.subheader("Create your account")
+        st.caption("Got an invite code from a friend? You're in the right place.")
+
+        new_u = st.text_input("Username", key="signup_user", placeholder="how friends will know you")
+        new_p = st.text_input("Password", type="password", key="signup_pw", placeholder="at least 6 characters")
         new_p2 = st.text_input("Confirm password", type="password", key="signup_pw2")
-        code = st.text_input("Invite code", key="signup_code")
-        if st.button("Create account", type="primary"):
+        code = st.text_input(
+            "Invite code",
+            key="signup_code",
+            placeholder="paste the code your friend sent",
+        )
+
+        if st.button("Create my account 🥃", type="primary", use_container_width=True):
             expected_code = st.secrets.get("signup_code", "")
             new_u_clean = new_u.strip()
             new_u_key = normalize_username(new_u_clean)
@@ -540,13 +742,46 @@ if st.session_state.user is None:
             elif new_u_key in db["users"]:
                 st.error("That username is taken.")
             elif not expected_code:
-                st.error("Signup is disabled (no invite code configured).")
+                st.error("Signup is disabled right now (no invite code configured).")
             elif code.strip() != expected_code:
-                st.error("Invalid invite code.")
+                st.error("That invite code doesn't look right. Double-check with your friend.")
             else:
                 create_user(db, new_u_clean, new_p)
                 st.session_state.user = new_u_key
-                st.success(f"Welcome, {new_u_clean}!")
+                st.toast(f"Welcome, {new_u_clean}! 🥃", icon="🎉")
+                st.rerun()
+
+        st.divider()
+        already_col = st.columns([1, 2, 1])[1]
+        with already_col:
+            if st.button(
+                "Already have an account? Sign in",
+                use_container_width=True,
+                key="switch_to_login",
+            ):
+                st.session_state.auth_view = "login"
+                st.rerun()
+
+    else:  # login view
+        st.subheader("Welcome back")
+        u = st.text_input("Username", key="login_user")
+        p = st.text_input("Password", type="password", key="login_pw")
+        if st.button("Sign in 🥃", type="primary", use_container_width=True):
+            if verify_user(db, u, p):
+                st.session_state.user = normalize_username(u)
+                st.rerun()
+            else:
+                st.error("Wrong username or password.")
+
+        st.divider()
+        new_col = st.columns([1, 2, 1])[1]
+        with new_col:
+            if st.button(
+                "New here? Create an account",
+                use_container_width=True,
+                key="switch_to_signup",
+            ):
+                st.session_state.auth_view = "signup"
                 st.rerun()
 
     st.stop()
@@ -582,46 +817,127 @@ tab_admin = tabs[5] if is_admin else None
 
 # --- Recommend ---
 with tab_recommend:
-    if not [b for b in inventory if b.quantity > 0]:
-        st.info("Add some bottles first.")
-    else:
-        mode = st.selectbox(
-            "Mode", ["preference", "random", "special", "preservation"],
-            help="preference: match your taste · random: surprise me · special: save the good stuff · preservation: drink what's getting low",
+    available_bottles = [b for b in inventory if b.quantity > 0]
+    if not available_bottles:
+        # Friendly empty state for first-time users
+        st.markdown(
+            """
+            <div style='text-align:center; padding: 2rem 0;'>
+                <div style='font-size:3rem;'>🥃</div>
+                <h3 style='margin-top:0.5rem;'>Your shelf is empty</h3>
+                <p style='color:#888;'>Add a bottle and I'll start recommending pours.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        top_n = st.slider("How many suggestions?", 1, 5, 3)
+        if st.button("➕ Add my first bottle", type="primary", use_container_width=True):
+            st.components.v1.html(
+                """
+                <script>
+                const tabs = window.parent.document.querySelectorAll('button[role="tab"]');
+                for (const t of tabs) {
+                    if (t.innerText.trim() === 'Add Bottle') { t.click(); break; }
+                }
+                </script>
+                """,
+                height=0,
+            )
+    else:
+        st.markdown("### What's the vibe?")
 
-        if st.button("Recommend", type="primary", use_container_width=True):
-            results = recommend_bottles(inventory, prefs, mode, recent_ids, top_n)
-            for r in results:
-                b = r["bottle"]
-                with st.container(border=True):
-                    title = b.name
-                    if b.private_pick and b.pick_group:
-                        title += f" — {b.pick_group} pick"
-                    st.subheader(title)
-                    st.caption(
-                        f"{b.type} · {b.proof}° proof · {b.fill_percent:.0f}% full · "
-                        f"qty {b.quantity}"
-                    )
-                    st.write(f"**Why:** {r['reason']}")
-                    if b.my_tasting_notes:
-                        st.write(f"**Your notes:** {', '.join(b.my_tasting_notes)}")
-                    if b.world_tasting_notes:
-                        st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
-                    # Pour size selector + log button
-                    pour_oz = st.radio(
-                        "Pour size (oz)",
-                        options=[0.5, 1.0, 1.5, 2.0],
-                        index=1,
-                        horizontal=True,
-                        key=f"pour_size_{b.id}",
-                        format_func=lambda x: f"{x} oz",
-                    )
-                    if st.button("I poured this 🥃", key=f"pour_{b.id}"):
-                        log_pour(db, current_user, b.id, pour_oz)
-                        st.toast(f"Logged a {pour_oz} oz pour of {b.name}. Cheers.", icon="🥃")
-                        st.rerun()
+        vibe_keys = list(VIBES.keys())
+        # Use a radio with vertical layout so the blurb fits comfortably
+        vibe = st.radio(
+            "Vibe",
+            options=vibe_keys,
+            index=0,
+            label_visibility="collapsed",
+            format_func=lambda v: f"**{v}** — {VIBES[v]['blurb']}",
+            key="vibe",
+        )
+
+        # Optional context controls in an expander to keep the surface clean
+        with st.expander("More context (optional)"):
+            people_count = st.slider(
+                "How many people drinking?",
+                min_value=1, max_value=8, value=1,
+                help="With more people, we'll lean toward crowd-friendly bottles.",
+            )
+            top_n = st.slider("Number of suggestions", 1, 5, 3)
+
+        # Quick-recommend button
+        if st.button(
+            "🥃 Recommend me a pour",
+            type="primary",
+            use_container_width=True,
+        ):
+            results = recommend_bottles(
+                inventory, prefs, vibe, recent_ids,
+                top_n=top_n,
+                people_count=people_count,
+            )
+            st.session_state["last_recommendation"] = {
+                "results_ids": [r["bottle"].id for r in results],
+                "vibe": vibe,
+            }
+            st.rerun()
+
+        # Render the most recent recommendation set (persists across pour-logs)
+        last = st.session_state.get("last_recommendation")
+        if last:
+            id_set = last["results_ids"]
+            id_to_bottle = {b.id: b for b in inventory}
+            shown = [id_to_bottle[bid] for bid in id_set if bid in id_to_bottle]
+
+            if not shown:
+                st.info("Those bottles aren't available anymore. Pick a vibe and recommend again.")
+            else:
+                st.markdown("---")
+                st.markdown(f"#### For **{last['vibe'].lower()}** — here's what I'd pour:")
+
+                for b in shown:
+                    # Re-derive the reason for this bottle in case state has shifted
+                    reason = build_natural_reason(b, prefs, last["vibe"], recent_ids)
+                    with st.container(border=True):
+                        title = f"### {b.name}"
+                        if b.private_pick and b.pick_group:
+                            st.markdown(title)
+                            st.caption(f"_{b.pick_group} pick_")
+                        else:
+                            st.markdown(title)
+
+                        st.caption(
+                            f"{b.type} · {b.proof:.0f}° proof · "
+                            f"{b.fill_percent:.0f}% full · qty {b.quantity}"
+                        )
+
+                        st.markdown(f"**Why:** {reason}.")
+
+                        if b.my_tasting_notes:
+                            st.markdown(f"**Your notes:** _{', '.join(b.my_tasting_notes)}_")
+                        if b.world_tasting_notes:
+                            st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
+
+                        # Pour controls
+                        pour_oz = st.radio(
+                            "Pour size",
+                            options=[0.5, 1.0, 1.5, 2.0],
+                            index=1,
+                            horizontal=True,
+                            key=f"pour_size_{b.id}",
+                            format_func=lambda x: f"{x} oz",
+                        )
+                        if st.button(
+                            "I poured this 🥃",
+                            key=f"pour_{b.id}",
+                            use_container_width=True,
+                        ):
+                            log_pour(db, current_user, b.id, pour_oz)
+                            st.toast(
+                                f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
+                                icon="🥃",
+                            )
+                            st.rerun()
 
 # --- Inventory ---
 with tab_inventory:
@@ -668,7 +984,7 @@ with tab_inventory:
         s_col, v_col, z_col = st.columns([2, 1, 1])
         sort_by = s_col.selectbox("Sort by", sort_options, key="inv_sort")
         view_mode = v_col.selectbox("View", ["List", "Cards"], key="inv_view")
-        show_zero = z_col.checkbox("Show 0-qty", value=False, key="inv_show_zero")
+        show_zero = z_col.checkbox("Show empties", value=False, key="inv_show_zero")
 
         # --- Quick filter chips ---
         chip_options = ["Sealed only", "Open only", "Running low", "Private picks"]

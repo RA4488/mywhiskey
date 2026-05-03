@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -1450,6 +1451,13 @@ VIBES = {
         "filters": {},  # custom — handled inline
         "forgotten": True,
     },
+    "Cracking something special": {
+        # Custom-scored — for celebrations, milestones, the bottle you've been saving
+        "blurb": "An occasion worth remembering. The one you've been saving.",
+        "weights": {},  # ignored; uses special-occasion-specific scoring
+        "filters": {},  # custom — handled inline
+        "special_occasion": True,
+    },
     "Surprise me": {
         "blurb": "Roll the dice — pick something random.",
         "weights": {},  # ignored, uses random
@@ -1497,6 +1505,151 @@ def low_proof_score(bottle: Bottle) -> float:
     return 0.1
 
 
+def _has_age_statement(bottle: Bottle) -> Optional[int]:
+    """Sniff for an age in years from the bottle name (e.g. 'Eagle Rare 17 Year').
+    Returns the age if found, else None. Looks for a number followed by year/yr."""
+    if not bottle.name:
+        return None
+    m = re.search(r"\b(\d{1,2})\s*(?:year|yr|yo)\b", bottle.name, flags=re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def special_occasion_score(
+    bottle: Bottle,
+    affinity: Dict[str, float],
+    days_since: Optional[int],
+) -> float:
+    """
+    Score a bottle for special occasions. Higher = more worth cracking.
+
+    Rewards: sealed bottles, private picks, age statements, high proof,
+    rarely-poured bottles. Penalizes: daily drinkers (multi-quantity at low
+    proof), recently-poured bottles, low affinity if you've already had it
+    enough to know you don't love it.
+    """
+    score = 0.0
+
+    # Sealed = the whole point of saving for a moment
+    if bottle.sealed:
+        score += 0.30
+    else:
+        # Open bottles can still be special if they're rarely poured and high-end
+        score += 0.05
+
+    # Private pick = personal, often a story attached
+    if bottle.private_pick:
+        score += 0.25
+
+    # Age statement = traditionally the "good stuff"
+    age = _has_age_statement(bottle)
+    if age is not None:
+        if age >= 15:
+            score += 0.30
+        elif age >= 10:
+            score += 0.20
+        elif age >= 6:
+            score += 0.10
+
+    # Higher proof = often the special-event bourbon (barrel proof, cask strength)
+    if bottle.proof:
+        if bottle.proof >= 120:
+            score += 0.20
+        elif bottle.proof >= 110:
+            score += 0.15
+        elif bottle.proof >= 100:
+            score += 0.05
+
+    # Penalize daily drinkers — multi-quantity low-proof bottles are weeknight pours
+    if bottle.quantity > 1 and bottle.proof and bottle.proof < 100:
+        score -= 0.20
+
+    # Penalize bottles you've poured very recently — not "special" if you just had it
+    if days_since is not None and days_since < 14:
+        score -= 0.30
+
+    # Affinity: if you've poured it a TON, it's a daily driver; subtle penalty
+    aff = affinity.get(bottle.id, 0)
+    if aff >= 0.85:
+        score -= 0.15
+
+    # Bottles you've never tried get a small bonus — opening something new IS the celebration
+    if days_since is None and bottle.sealed:
+        score += 0.10
+
+    return max(0.0, score)
+
+
+def special_occasion_reasoning_via_ai(
+    bottles: List[Bottle], occasion_text: str
+) -> Dict[str, str]:
+    """
+    Optional: call Claude once with the candidate bottles and the occasion text;
+    get back a personalized one-line reason per bottle keyed by bottle id.
+    Falls back gracefully if the API call fails — caller uses programmatic
+    reasoning in that case.
+    """
+    if not occasion_text or not occasion_text.strip() or not bottles:
+        return {}
+
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        return {}
+    api_key = st.secrets.get("anthropic_api_key")
+    if not api_key:
+        return {}
+
+    client = Anthropic(api_key=api_key)
+    bottle_summaries = []
+    for b in bottles:
+        parts = [f"id={b.id}", f"name={b.name}", f"type={b.type}"]
+        if b.proof:
+            parts.append(f"proof={b.proof:.0f}")
+        if b.private_pick and b.pick_group:
+            parts.append(f"private_pick=({b.pick_group})")
+        elif b.private_pick:
+            parts.append("private_pick=true")
+        age = _has_age_statement(b)
+        if age:
+            parts.append(f"age={age}yr")
+        if b.world_tasting_notes:
+            parts.append(f"notes=[{', '.join(b.world_tasting_notes[:5])}]")
+        bottle_summaries.append("  - " + " ".join(parts))
+
+    prompt = (
+        f"The user is celebrating: \"{occasion_text.strip()}\"\n\n"
+        f"They're choosing from these bottles:\n"
+        + "\n".join(bottle_summaries)
+        + "\n\nFor each bottle, write ONE short sentence (under 18 words) explaining "
+        "why it fits this occasion. Match the tone of the occasion — celebratory, "
+        "reflective, intimate, etc. Don't be generic. Reference what makes the bottle "
+        "special (age, private pick, proof, etc.) AND the occasion together.\n\n"
+        "Return ONLY a JSON object mapping bottle id to the sentence, like:\n"
+        '{"b_123": "Sentence here.", "b_456": "Another sentence."}'
+    )
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
 def recommend_bottles(
     inventory: List[Bottle],
     prefs: Preferences,
@@ -1506,6 +1659,7 @@ def recommend_bottles(
     people_count: int = 1,
     affinity: Optional[Dict[str, float]] = None,
     pour_log: Optional[List[Dict]] = None,
+    occasion_text: str = "",
 ) -> List[Dict]:
     """Vibe-driven recommendation. Affinity (learned from pour history) is layered in."""
     vibe_config = VIBES.get(vibe, VIBES["Just a regular pour"])
@@ -1570,6 +1724,52 @@ def recommend_bottles(
             }
             for b, s in scored[:top_n]
         ]
+
+    # --- Special-case: Cracking something special ---
+    if vibe_config.get("special_occasion"):
+        days_since = days_since_last_pour(pour_log)
+        scored = []
+        for b in candidates:
+            d = days_since.get(b.id)  # None if never poured
+            score = special_occasion_score(b, affinity, d)
+            scored.append((b, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = scored[:top_n]
+
+        # If user provided occasion text, get personalized reasoning from the AI;
+        # otherwise build it programmatically.
+        ai_reasons: Dict[str, str] = {}
+        if occasion_text and occasion_text.strip():
+            ai_reasons = special_occasion_reasoning_via_ai(
+                [b for b, _ in top], occasion_text
+            )
+
+        results = []
+        for b, s in top:
+            ai_reason = ai_reasons.get(b.id, "").strip()
+            if ai_reason:
+                reason = ai_reason
+            else:
+                # Programmatic fallback
+                bits = []
+                if b.sealed:
+                    bits.append("sealed and waiting for the right moment")
+                if b.private_pick and b.pick_group:
+                    bits.append(f"a {b.pick_group} pick")
+                elif b.private_pick:
+                    bits.append("a private pick")
+                age = _has_age_statement(b)
+                if age and age >= 10:
+                    bits.append(f"{age}-year stated age")
+                if b.proof and b.proof >= 110:
+                    bits.append(f"{b.proof:.0f}° barrel-strength heat")
+                if not bits:
+                    bits.append("worth marking the moment")
+                reason = "; ".join(bits)
+                reason = reason[0].upper() + reason[1:]
+            results.append({"bottle": b, "score": round(s, 3), "reason": reason})
+        return results
 
     # --- Standard vibe path ---
     # Apply vibe filters
@@ -2121,6 +2321,16 @@ with tab_recommend:
             key="vibe",
         )
 
+        # Occasion text only shows for the special-occasion vibe
+        occasion_text = ""
+        if vibe == "Cracking something special":
+            occasion_text = st.text_input(
+                "What's the occasion? (optional)",
+                placeholder="e.g. promotion, anniversary, friend in town from out of state",
+                key="occasion_text",
+                help="Adding context lets the AI tailor the reasoning to your moment.",
+            )
+
         with st.expander("More context (optional)"):
             people_count = st.slider(
                 "How many people drinking?",
@@ -2140,10 +2350,15 @@ with tab_recommend:
                 people_count=people_count,
                 affinity=affinity,
                 pour_log=pour_log,
+                occasion_text=occasion_text,
             )
             st.session_state["last_recommendation"] = {
                 "results_ids": [r["bottle"].id for r in results],
                 "vibe": vibe,
+                "occasion_text": occasion_text,
+                # Stash the per-bottle reasons so they survive the rerun without
+                # re-calling the AI (which would cost money and produce different text)
+                "reasons": {r["bottle"].id: r["reason"] for r in results},
             }
             st.rerun()
 
@@ -2168,13 +2383,19 @@ with tab_recommend:
 
                 # Pre-compute days-since for use in the per-result reason
                 last_days_since = days_since_last_pour(pour_log)
+                stashed_reasons = last.get("reasons", {})
 
                 for b in shown:
-                    # Re-derive the reason in case state has shifted
-                    reason = build_natural_reason(
-                        b, prefs, last["vibe"], recent_ids, affinity,
-                        last_days_since.get(b.id),
-                    )
+                    # Use stashed reason if we have one (avoids re-calling AI for
+                    # special-occasion personalized text). Otherwise rebuild
+                    # programmatically.
+                    if b.id in stashed_reasons:
+                        reason = stashed_reasons[b.id]
+                    else:
+                        reason = build_natural_reason(
+                            b, prefs, last["vibe"], recent_ids, affinity,
+                            last_days_since.get(b.id),
+                        )
                     with st.container(border=True):
                         title = f"### {b.name}"
                         if b.private_pick and b.pick_group:

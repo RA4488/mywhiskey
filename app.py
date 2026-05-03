@@ -1053,6 +1053,10 @@ def identify_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
         "  is_sealed: true if the bottle appears unopened (intact tax strip, foil, "
         "capsule, or neck wrap visible and undamaged); false if opened (broken seal, "
         "missing capsule, visible cork or stopper exposed); null if you cannot tell.\n"
+        "  estimated_fill_percent: if the bottle is opened AND you can see the liquid "
+        "level through the glass, estimate the fill percentage 0-100 (number). "
+        "If sealed, return 100. If you cannot see the liquid level (label covers it, "
+        "opaque glass, etc.), return null.\n"
         "  is_private_pick: true if the label or any sticker indicates a private barrel "
         "selection, store pick, single barrel selection for a group, or similar (look for "
         '"selected for", "private selection", "barrel pick", "store pick", group/store '
@@ -2942,6 +2946,11 @@ with tab_add:
             try:
                 result = identify_bottle_from_image(image_bytes, image_mime)
                 st.session_state["identified"] = result
+                # Clear stale form state so the new auto-fill values take effect.
+                # Streamlit text_inputs with explicit keys persist their value
+                # across reruns, which would otherwise override the new defaults.
+                for k in ("bottle_world_notes", "bottle_my_notes"):
+                    st.session_state.pop(k, None)
             except json.JSONDecodeError:
                 st.error("Claude returned invalid JSON. Try another photo or enter manually.")
             except Exception as e:
@@ -3004,7 +3013,25 @@ with tab_add:
             f"{'sealed' if detected_sealed else 'opened'} from the photo._"
         )
 
-    fill = st.slider("Fill %", 0, 100, 100 if sealed else 90)
+    # Fill % default: prefer the AI's estimate when available; otherwise 100 if
+    # sealed, 90 if opened (just a reasonable starting guess for the user to adjust).
+    detected_fill = identified.get("estimated_fill_percent") if identified else None
+    if detected_fill is not None:
+        try:
+            detected_fill = int(round(float(detected_fill)))
+            detected_fill = max(0, min(100, detected_fill))
+        except (TypeError, ValueError):
+            detected_fill = None
+    if detected_fill is not None:
+        fill_default = detected_fill
+    else:
+        fill_default = 100 if sealed else 90
+
+    fill = st.slider("Fill %", 0, 100, fill_default)
+    if detected_fill is not None and identified:
+        st.caption(f"_AI estimated fill at {detected_fill}% from the photo._")
+    elif identified and not sealed:
+        st.caption("_Couldn't see the liquid level — adjust manually._")
 
     # Private pick toggle + conditional group field
     detected_private = bool(identified.get("is_private_pick", False))

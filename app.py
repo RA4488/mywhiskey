@@ -2819,6 +2819,18 @@ with tab_lookup:
                         "verify the name before trusting the rest."
                     )
 
+            # ---- Where to buy / look it up online ----
+            st.divider()
+            from urllib.parse import quote_plus
+            search_query = f"{detected['name']} buy"
+            google_url = f"https://www.google.com/search?q={quote_plus(search_query)}"
+            st.link_button(
+                "🔎 Search online for this bottle",
+                google_url,
+                use_container_width=True,
+                help="Opens a Google search in a new tab so you can compare prices and find a retailer.",
+            )
+
             # ---- Action buttons ----
             st.divider()
             act_save, act_clear = st.columns(2)

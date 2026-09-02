@@ -2669,9 +2669,9 @@ if st.session_state.user is None:
 
 # --- Auth screens ---
 if st.session_state.user is None:
-    # Signup is the default mode
+    # Signup requires an explicit tap; login is the default for returning users
     if "auth_view" not in st.session_state:
-        st.session_state.auth_view = "signup"
+        st.session_state.auth_view = "login"
 
     if st.session_state.auth_view == "login":
         # ---- Sign in (design 8a) ----

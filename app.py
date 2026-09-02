@@ -1329,6 +1329,71 @@ def lookup_bottle_from_image(image_bytes: bytes, mime_type: str) -> Dict:
     return json.loads(text)
 
 
+def lookup_bottle_from_text(bottle_name: str) -> Dict:
+    """Return the same rich detail structure as lookup_bottle_from_image, but
+    from a text name instead of a photo. Less reliable than vision (no label
+    verification) — the AI is asked to flag ambiguous names."""
+    from anthropic import Anthropic
+
+    api_key = st.secrets.get("anthropic_api_key")
+    if not api_key:
+        raise RuntimeError("Missing anthropic_api_key in Streamlit secrets.")
+
+    client = Anthropic(api_key=api_key)
+
+    prompt = (
+        f'The user is asking about this whiskey/spirit bottle: "{bottle_name.strip()}"\n\n'
+        "Provide a detailed lookup for someone deciding whether to buy it. "
+        "Return ONLY a JSON object with these exact keys, no other text:\n"
+        "  name: the full official bottle name — clarify if the user's input was "
+        "abbreviated (e.g. 'ER10' -> 'Eagle Rare 10 Year'). If the name is genuinely "
+        "ambiguous (e.g. 'Eagle Rare' could mean the 10-year, 17-year, or a barrel "
+        "pick), pick the most likely / most common variant.\n"
+        '  type: one of "bourbon", "rye", "scotch", "rum", "other" (string)\n'
+        "  proof: proof number if known (number or null)\n"
+        "  age_statement: age if known (e.g. '10 year', 'NAS' for no age statement, or null)\n"
+        "  distillery: distillery or brand owner if known (string or null)\n"
+        "  region: region of origin if relevant (e.g. 'Kentucky', 'Islay', null)\n"
+        "  mash_bill: mash bill if commonly known (e.g. 'high-rye bourbon', or null)\n"
+        "  tasting_notes: array of 4-8 short tasting note keywords commonly associated "
+        "with this bottle (e.g. ['caramel','oak','vanilla','baking spice']). Lowercase. "
+        "Empty array if you don't know the bottle.\n"
+        "  description: 2-3 sentence plain-English summary of what this bottle is and "
+        "what people generally think of it (string).\n"
+        "  estimated_msrp_usd: typical retail MSRP in USD if you have any idea, as a "
+        "number (no currency symbol). null if unknown.\n"
+        "  msrp_confidence: how confident you are in the MSRP estimate, one of: "
+        '"high", "medium", "low", "unknown".\n'
+        "  allocated: true if this is widely considered an allocated/hard-to-find "
+        "bottle that often sells above MSRP at retail; false otherwise; null if unknown.\n"
+        "  is_private_pick: false (text lookups can't tell — user would type the pick "
+        "name explicitly if it were one).\n"
+        "  pick_group: empty.\n"
+        "  confidence: 0-1, how sure you are the bottle you identified matches what "
+        "the user meant. If the input name is very ambiguous, use a lower confidence "
+        "(0.3-0.5) and note the ambiguity in the `notes` field.\n"
+        "  notes: short string. If the name was ambiguous, explain which variant you "
+        "picked and mention the alternatives briefly. Empty string if the match is "
+        "clear.\n"
+        "If the bottle name doesn't match any known spirit, return name as empty "
+        "string and confidence as 0."
+    )
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1200,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    text = response.content[0].text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    return json.loads(text)
+
+
 def fit_score_for_lookup(detected: Dict, prefs: Preferences, affinity: Dict[str, float]) -> float:
     """How well does this bottle fit the user, on a 0-1 scale.
     affinity is included so 'people similar to your favorites' boosts fit.
@@ -3599,11 +3664,43 @@ with tab_bar:
 
 # --- Bottle Look Up ---
 with tab_lookup:
-    st.markdown("### 🔎 Bottle Look Up")
-    st.caption(
-        "Snap any bottle and get a quick **BUY / YOUR CALL / SKIP** verdict based on "
-        "your taste. Add the price (optional) for a value check too."
+    # Modernist header
+    st.html(
+        '<div style="padding: 4px 0 6px">'
+        '  <div class="shelf-header-title">Look up</div>'
+        '  <div class="mono-kicker-muted" style="margin-top: 4px">SHOULD I BUY THIS?</div>'
+        '</div>'
+        '<div style="border-bottom: 2px solid var(--color-divider); margin: 6px 0 18px"></div>'
     )
+    st.caption(
+        "Get a **BUY / YOUR CALL / SKIP** verdict on any bottle. "
+        "Snap the label, or type the name if you don't have a photo. "
+        "Optional price makes it a value check too."
+    )
+
+    # ---- Mode toggle: Photo | Name ----
+    if "lookup_mode" not in st.session_state:
+        st.session_state.lookup_mode = "photo"
+
+    mode_l, mode_r = st.columns(2)
+    with mode_l:
+        if st.button(
+            "📷 Photo",
+            key="lookup_mode_photo",
+            type="primary" if st.session_state.lookup_mode == "photo" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.lookup_mode = "photo"
+            st.rerun()
+    with mode_r:
+        if st.button(
+            "⌨️ Name",
+            key="lookup_mode_text",
+            type="primary" if st.session_state.lookup_mode == "text" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.lookup_mode = "text"
+            st.rerun()
 
     # Camera/upload
     if "lookup_camera_open" not in st.session_state:
@@ -3611,64 +3708,99 @@ with tab_lookup:
     if "lookup_uploader_version" not in st.session_state:
         st.session_state.lookup_uploader_version = 0
 
-    col_cam, col_upload = st.columns(2)
-    if col_cam.button(
-        "📷 Close camera" if st.session_state.lookup_camera_open else "📷 Use camera",
-        key="lookup_cam_toggle",
-        use_container_width=True,
-    ):
-        st.session_state.lookup_camera_open = not st.session_state.lookup_camera_open
-        st.rerun()
+    # ---- Photo mode ----
+    if st.session_state.lookup_mode == "photo":
+        col_cam, col_upload = st.columns(2)
+        if col_cam.button(
+            "📷 Close camera" if st.session_state.lookup_camera_open else "📷 Use camera",
+            key="lookup_cam_toggle",
+            use_container_width=True,
+        ):
+            st.session_state.lookup_camera_open = not st.session_state.lookup_camera_open
+            st.rerun()
 
-    uploaded = col_upload.file_uploader(
-        "Upload",
-        type=["jpg", "jpeg", "png", "webp"],
-        label_visibility="collapsed",
-        key=f"lookup_uploader_{st.session_state.lookup_uploader_version}",
-    )
+        uploaded = col_upload.file_uploader(
+            "Upload",
+            type=["jpg", "jpeg", "png", "webp"],
+            label_visibility="collapsed",
+            key=f"lookup_uploader_{st.session_state.lookup_uploader_version}",
+        )
 
-    photo_bytes = None
-    photo_mime = "image/jpeg"
+        photo_bytes = None
+        photo_mime = "image/jpeg"
 
-    if st.session_state.lookup_camera_open:
-        try:
-            from streamlit_back_camera_input import back_camera_input
-            st.caption("Tap the video to capture.")
-            captured = back_camera_input(key="lookup_rear_cam")
-            if captured is not None:
-                if isinstance(captured, str) and captured.startswith("data:image"):
-                    header, data = captured.split(",", 1)
-                    photo_mime = header.split(";")[0].replace("data:", "")
-                    photo_bytes = base64.b64decode(data)
-                elif hasattr(captured, "getvalue"):
-                    photo_bytes = captured.getvalue()
-                    photo_mime = getattr(captured, "type", "image/jpeg") or "image/jpeg"
-                else:
-                    photo_bytes = bytes(captured)
-        except ImportError:
-            fallback = st.camera_input("Take a photo")
-            if fallback is not None:
-                photo_bytes = fallback.getvalue()
-                photo_mime = fallback.type or "image/jpeg"
-
-    image_bytes = photo_bytes if photo_bytes else (uploaded.getvalue() if uploaded else None)
-    image_mime = photo_mime if photo_bytes else (uploaded.type if uploaded else "image/jpeg")
-
-    if image_bytes is not None and st.button(
-        "🔎 Look up this bottle",
-        type="primary",
-        use_container_width=True,
-    ):
-        with st.spinner("Reading the bottle and pulling what's known about it..."):
+        if st.session_state.lookup_camera_open:
             try:
-                result = lookup_bottle_from_image(image_bytes, image_mime)
-                st.session_state["lookup_result"] = result
-                st.session_state["lookup_image_bytes"] = image_bytes
-                st.session_state["lookup_image_mime"] = image_mime
-            except json.JSONDecodeError:
-                st.error("AI returned invalid JSON. Try a clearer photo.")
-            except Exception as e:
-                st.error(f"Couldn't look up bottle: {e}")
+                from streamlit_back_camera_input import back_camera_input
+                st.caption("Tap the video to capture.")
+                captured = back_camera_input(key="lookup_rear_cam")
+                if captured is not None:
+                    if isinstance(captured, str) and captured.startswith("data:image"):
+                        header, data = captured.split(",", 1)
+                        photo_mime = header.split(";")[0].replace("data:", "")
+                        photo_bytes = base64.b64decode(data)
+                    elif hasattr(captured, "getvalue"):
+                        photo_bytes = captured.getvalue()
+                        photo_mime = getattr(captured, "type", "image/jpeg") or "image/jpeg"
+                    else:
+                        photo_bytes = bytes(captured)
+            except ImportError:
+                fallback = st.camera_input("Take a photo")
+                if fallback is not None:
+                    photo_bytes = fallback.getvalue()
+                    photo_mime = fallback.type or "image/jpeg"
+
+        image_bytes = photo_bytes if photo_bytes else (uploaded.getvalue() if uploaded else None)
+        image_mime = photo_mime if photo_bytes else (uploaded.type if uploaded else "image/jpeg")
+
+        if image_bytes is not None and st.button(
+            "🔎 Look up this bottle",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner("Reading the bottle and pulling what's known about it..."):
+                try:
+                    result = lookup_bottle_from_image(image_bytes, image_mime)
+                    st.session_state["lookup_result"] = result
+                    st.session_state["lookup_image_bytes"] = image_bytes
+                    st.session_state["lookup_image_mime"] = image_mime
+                    st.session_state["lookup_source"] = "photo"
+                except json.JSONDecodeError:
+                    st.error("AI returned invalid JSON. Try a clearer photo.")
+                except Exception as e:
+                    st.error(f"Couldn't look up bottle: {e}")
+
+    # ---- Text mode ----
+    else:
+        text_query = st.text_input(
+            "Bottle name",
+            key="lookup_text_input",
+            placeholder="e.g. Eagle Rare 10 Year, Blanton's, Springbank 15…",
+            label_visibility="collapsed",
+        )
+        st.caption(
+            "Text search is less reliable than a photo — the AI has to guess "
+            "which variant you mean if the name is common."
+        )
+
+        if text_query and text_query.strip() and st.button(
+            f"🔎 Look up \"{text_query.strip()}\"",
+            type="primary",
+            use_container_width=True,
+            key="lookup_text_submit",
+        ):
+            with st.spinner("Pulling what's known about this bottle..."):
+                try:
+                    result = lookup_bottle_from_text(text_query.strip())
+                    st.session_state["lookup_result"] = result
+                    # Text lookup means no image to store/upload
+                    st.session_state.pop("lookup_image_bytes", None)
+                    st.session_state.pop("lookup_image_mime", None)
+                    st.session_state["lookup_source"] = "text"
+                except json.JSONDecodeError:
+                    st.error("AI returned invalid JSON. Try rephrasing the bottle name.")
+                except Exception as e:
+                    st.error(f"Couldn't look up bottle: {e}")
 
     detected = st.session_state.get("lookup_result")
 
@@ -3843,6 +3975,8 @@ with tab_lookup:
                 st.session_state.pop("lookup_result", None)
                 st.session_state.pop("lookup_image_bytes", None)
                 st.session_state.pop("lookup_image_mime", None)
+                st.session_state.pop("lookup_source", None)
+                st.session_state.pop("lookup_text_input", None)
                 st.session_state.lookup_uploader_version += 1
                 st.session_state.lookup_camera_open = False
                 st.toast(
@@ -3855,44 +3989,23 @@ with tab_lookup:
                 st.session_state.pop("lookup_result", None)
                 st.session_state.pop("lookup_image_bytes", None)
                 st.session_state.pop("lookup_image_mime", None)
+                st.session_state.pop("lookup_source", None)
+                st.session_state.pop("lookup_text_input", None)
                 st.session_state.lookup_uploader_version += 1
                 st.session_state.lookup_camera_open = False
                 st.rerun()
 
 # --- Inventory ---
 with tab_inventory:
-    # ---- Header: title + count + Add button (design 3a) ----
+    # ---- Header (design 3a) ----
     total_bottles = sum(max(0, b.quantity) for b in inventory)
-    header_col, add_col = st.columns([3, 1])
-    with header_col:
-        st.html(
-            f'<div style="padding: 4px 0 2px;">'
-            f'  <div class="shelf-header-title">The shelf</div>'
-            f'  <div class="shelf-header-count">{total_bottles} OF {len(inventory)}</div>'
-            f'</div>'
-        )
-    with add_col:
-        st.write("")  # vertical alignment nudge
-        if st.button("+ Add", type="primary", use_container_width=True, key="inv_add_top"):
-            st.components.v1.html(
-                """
-                <script>
-                (function() {
-                    const doc = window.parent.document;
-                    const tabButtons = doc.querySelectorAll('button[role="tab"]');
-                    for (const btn of tabButtons) {
-                        if (btn.innerText.trim() === 'Add Bottle') {
-                            btn.click();
-                            window.parent.scrollTo({top: 0, behavior: 'smooth'});
-                            break;
-                        }
-                    }
-                })();
-                </script>
-                """,
-                height=0,
-            )
-    st.html('<div style="border-bottom: 2px solid var(--color-divider); margin: 6px 0 14px;"></div>')
+    st.html(
+        f'<div style="padding: 4px 0 2px;">'
+        f'  <div class="shelf-header-title">The shelf</div>'
+        f'  <div class="shelf-header-count">{total_bottles} OF {len(inventory)}</div>'
+        f'</div>'
+        f'<div style="border-bottom: 2px solid var(--color-divider); margin: 6px 0 14px;"></div>'
+    )
 
     if not inventory:
         st.info("No bottles yet.")

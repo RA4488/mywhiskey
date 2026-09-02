@@ -42,6 +42,7 @@ class Bottle:
     private_pick: bool = False
     pick_group: str = ""
     size_ml: int = 750
+    photo_url: str = ""
 
 
 @dataclass
@@ -77,6 +78,96 @@ def _is_supabase_enabled() -> bool:
     return _get_supabase_client() is not None
 
 
+# -----------------------------
+# Bottle photo storage (Supabase Storage bucket)
+# -----------------------------
+
+BOTTLE_PHOTOS_BUCKET = "bottle-photos"
+
+
+def _compress_image_for_storage(image_bytes: bytes, max_dim: int = 800,
+                                 quality: int = 80) -> bytes:
+    """Downsize + re-encode a phone photo to something reasonable for storage.
+    Phone photos are 3-5 MB; this brings them to 100-300 KB while keeping
+    enough detail to recognize the bottle in a tile."""
+    from PIL import Image
+    import io
+
+    img = Image.open(io.BytesIO(image_bytes))
+    # Handle rotation from phone EXIF
+    try:
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+
+    # Convert to RGB (JPEG doesn't support alpha, and some phone photos are RGBA)
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+
+    # Downsize keeping aspect ratio
+    img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=quality, optimize=True)
+    return out.getvalue()
+
+
+def upload_bottle_photo(image_bytes: bytes, bottle_id: str,
+                        username: str) -> Optional[str]:
+    """Compress a bottle photo and upload it to Supabase Storage.
+    Returns the public URL, or None if the upload failed.
+    Safe no-op if Supabase Storage isn't configured (local dev)."""
+    if not _is_supabase_enabled():
+        return None
+
+    try:
+        compressed = _compress_image_for_storage(image_bytes)
+    except Exception as e:
+        # If compression fails for some weird image format, don't crash;
+        # just skip storing the photo.
+        print(f"Photo compression failed: {e}")
+        return None
+
+    sb = _get_supabase_client()
+    # Path scheme: username/bottle_id.jpg — one photo per bottle, overwrite on re-add
+    path = f"{normalize_username(username)}/{bottle_id}.jpg"
+
+    try:
+        # upsert=true so re-adding the same bottle overwrites the old photo
+        sb.storage.from_(BOTTLE_PHOTOS_BUCKET).upload(
+            path,
+            compressed,
+            file_options={
+                "content-type": "image/jpeg",
+                "cache-control": "31536000",  # 1 year
+                "upsert": "true",
+            },
+        )
+    except Exception as e:
+        print(f"Photo upload failed: {e}")
+        return None
+
+    # Get the public URL (assumes the bucket is public — see setup guide)
+    try:
+        return sb.storage.from_(BOTTLE_PHOTOS_BUCKET).get_public_url(path)
+    except Exception as e:
+        print(f"Failed to get public URL: {e}")
+        return None
+
+
+def delete_bottle_photo(bottle_id: str, username: str) -> None:
+    """Delete a bottle's photo from Supabase Storage. Best-effort — silent on failure."""
+    if not _is_supabase_enabled():
+        return
+    sb = _get_supabase_client()
+    path = f"{normalize_username(username)}/{bottle_id}.jpg"
+    try:
+        sb.storage.from_(BOTTLE_PHOTOS_BUCKET).remove([path])
+    except Exception:
+        pass
+
+
 def _bottle_row_to_dict(row: Dict) -> Dict:
     """Convert a Supabase bottle row into the in-memory dict shape used by the app."""
     return {
@@ -92,6 +183,7 @@ def _bottle_row_to_dict(row: Dict) -> Dict:
         "private_pick": bool(row.get("private_pick", False)),
         "pick_group": row.get("pick_group", "") or "",
         "size_ml": int(row.get("size_ml", 750)),
+        "photo_url": row.get("photo_url") or "",
     }
 
 
@@ -110,6 +202,7 @@ def _bottle_dict_to_row(b: Dict, owner: str) -> Dict:
         "private_pick": bool(b.get("private_pick", False)),
         "pick_group": b.get("pick_group", "") or "",
         "size_ml": int(b.get("size_ml", 750)),
+        "photo_url": b.get("photo_url", "") or "",
     }
 
 
@@ -437,6 +530,7 @@ def normalize_bottle_record(b: Dict) -> Dict:
         b["sealed"] = not b.get("opened", False)
     b.setdefault("fill_percent", 100.0)
     b.setdefault("size_ml", 750)
+    b.setdefault("photo_url", "")
     return b
 
 
@@ -459,6 +553,7 @@ def get_user_bottles(db: Dict, username: str) -> List[Bottle]:
             private_pick=nb["private_pick"],
             pick_group=nb["pick_group"],
             size_ml=nb["size_ml"],
+            photo_url=nb.get("photo_url", ""),
         ))
     return bottles
 
@@ -2356,11 +2451,14 @@ iframe[title="streamlit_back_camera_input.back_camera_input"] {
         var(--color-surface) 6px 12px);
     position: relative;
     margin-bottom: 16px;
+    overflow: hidden;
 }
 .recommend-card .card-photo .rank-numeral {
     position: absolute;
     top: 14px;
     left: 18px;
+    z-index: 1;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.5);
 }
 .recommend-card .card-title {
     font-family: "Archivo", system-ui, sans-serif;
@@ -2882,9 +2980,22 @@ with tab_recommend:
                     _safe_name = b.name.replace("<", "&lt;").replace(">", "&gt;")
                     _safe_reason = (reason.rstrip(".") + ".").replace("<", "&lt;").replace(">", "&gt;")
 
+                    # Optional photo — sits inside the card-photo slot at grayscale.
+                    # The rank numeral overlays whether or not there's a photo.
+                    if b.photo_url:
+                        _photo_inner = (
+                            f'<img src="{b.photo_url}" '
+                            f'style="width:100%;height:100%;object-fit:cover;'
+                            f'filter:grayscale(1) contrast(1.08);display:block" '
+                            f'alt="{_safe_name}">'
+                        )
+                    else:
+                        _photo_inner = ""
+
                     st.html(
                         f'<div class="recommend-card">'
-                        f'  <div class="card-photo">'
+                        f'  <div class="card-photo" style="overflow:hidden">'
+                        f'    {_photo_inner}'
                         f'    <span class="rank-numeral">{idx:02d}</span>'
                         f'  </div>'
                         f'  <div class="card-title">{_safe_name}</div>'
@@ -3169,6 +3280,8 @@ with tab_lookup:
             try:
                 result = lookup_bottle_from_image(image_bytes, image_mime)
                 st.session_state["lookup_result"] = result
+                st.session_state["lookup_image_bytes"] = image_bytes
+                st.session_state["lookup_image_mime"] = image_mime
             except json.JSONDecodeError:
                 st.error("AI returned invalid JSON. Try a clearer photo.")
             except Exception as e:
@@ -3318,6 +3431,16 @@ with tab_lookup:
                 btype = detected.get("type", "other")
                 if btype not in ("bourbon", "rye", "scotch", "rum", "other"):
                     btype = "other"
+
+                # Upload the photo from the lookup session if we have one
+                photo_url = ""
+                stashed_bytes = st.session_state.get("lookup_image_bytes")
+                if stashed_bytes:
+                    with st.spinner("Saving photo..."):
+                        photo_url = upload_bottle_photo(
+                            stashed_bytes, new_id, current_user
+                        ) or ""
+
                 db["users"][current_user]["bottles"].append({
                     "id": new_id,
                     "name": detected["name"],
@@ -3331,9 +3454,12 @@ with tab_lookup:
                     "private_pick": bool(detected.get("is_private_pick", False)),
                     "pick_group": detected.get("pick_group", "") or "",
                     "size_ml": 750,
+                    "photo_url": photo_url,
                 })
                 save_db(db)
                 st.session_state.pop("lookup_result", None)
+                st.session_state.pop("lookup_image_bytes", None)
+                st.session_state.pop("lookup_image_mime", None)
                 st.session_state.lookup_uploader_version += 1
                 st.session_state.lookup_camera_open = False
                 st.toast(
@@ -3344,6 +3470,8 @@ with tab_lookup:
 
             if act_clear.button("Clear and look up another", use_container_width=True):
                 st.session_state.pop("lookup_result", None)
+                st.session_state.pop("lookup_image_bytes", None)
+                st.session_state.pop("lookup_image_mime", None)
                 st.session_state.lookup_uploader_version += 1
                 st.session_state.lookup_camera_open = False
                 st.rerun()
@@ -3565,6 +3693,8 @@ with tab_inventory:
                         save_db(db)
                         st.rerun()
                     if action_cols[1].button("Remove", key=f"del_{b.id}"):
+                        # Best-effort delete the stored photo too
+                        delete_bottle_photo(b.id, current_user)
                         db["users"][current_user]["bottles"] = [
                             x for x in db["users"][current_user]["bottles"] if x["id"] != b.id
                         ]
@@ -3585,10 +3715,22 @@ with tab_inventory:
 
                 safe_name = b.name.replace("<", "&lt;").replace(">", "&gt;")
 
+                # If we have a photo, render it inside the slot (grayscale per design system).
+                # Otherwise the hatched background shows through.
+                if b.photo_url:
+                    slot_inner = (
+                        f'<img src="{b.photo_url}" '
+                        f'style="width:100%;height:100%;object-fit:cover;'
+                        f'filter:grayscale(1) contrast(1.08);display:block" '
+                        f'alt="{safe_name}">'
+                    )
+                else:
+                    slot_inner = ""
+
                 with col:
                     st.html(
                         f'<div class="shelf-tile">'
-                        f'  <div class="{slot_class}"></div>'
+                        f'  <div class="{slot_class}" style="overflow:hidden">{slot_inner}</div>'
                         f'  <div class="shelf-tile-name">{safe_name}</div>'
                         f'  <div class="shelf-tile-fill {fill_class}">{b.fill_percent:.0f}%</div>'
                         f'</div>'
@@ -3762,6 +3904,12 @@ with tab_add:
             try:
                 result = identify_bottle_from_image(image_bytes, image_mime)
                 st.session_state["identified"] = result
+                # Stash the raw image so we can upload it when the user saves.
+                # We use bytes so it's small enough not to bloat session_state
+                # (a compressed phone photo is well under Streamlit's practical
+                # per-session limit).
+                st.session_state["identified_image_bytes"] = image_bytes
+                st.session_state["identified_image_mime"] = image_mime
                 # Clear stale form state so the new auto-fill values take effect.
                 # Streamlit text_inputs with explicit keys persist their value
                 # across reruns, which would otherwise override the new defaults.
@@ -3890,6 +4038,18 @@ with tab_add:
             st.error("Pick group / store required when 'Private Pick' is on.")
         else:
             new_id = f"b_{int(random.random() * 1_000_000)}"
+
+            # If a photo was captured/uploaded during identification, upload it
+            # to Supabase Storage now. Fires-and-forgets: if upload fails, we
+            # still save the bottle, just without a photo.
+            photo_url = ""
+            stashed_bytes = st.session_state.get("identified_image_bytes")
+            if stashed_bytes:
+                with st.spinner("Saving photo..."):
+                    photo_url = upload_bottle_photo(
+                        stashed_bytes, new_id, current_user
+                    ) or ""
+
             db["users"][current_user]["bottles"].append({
                 "id": new_id,
                 "name": name.strip(),
@@ -3903,12 +4063,15 @@ with tab_add:
                 "private_pick": bool(private_pick),
                 "pick_group": pick_group.strip(),
                 "size_ml": int(size_ml),
+                "photo_url": photo_url,
             })
             save_db(db)
             # Reset the form: drop the AI identification, clear tasting notes,
             # and bump the uploader key so the file picker remounts (this is the
             # only reliable way to clear st.file_uploader's selection).
             st.session_state.pop("identified", None)
+            st.session_state.pop("identified_image_bytes", None)
+            st.session_state.pop("identified_image_mime", None)
             st.session_state.pop("bottle_world_notes", None)
             st.session_state.pop("bottle_my_notes", None)
             st.session_state.uploader_version += 1
@@ -3921,6 +4084,8 @@ with tab_add:
 
     if col_clear.button("Clear photo result"):
         st.session_state.pop("identified", None)
+        st.session_state.pop("identified_image_bytes", None)
+        st.session_state.pop("identified_image_mime", None)
         st.session_state.pop("bottle_world_notes", None)
         st.session_state.pop("bottle_my_notes", None)
         st.session_state.uploader_version += 1

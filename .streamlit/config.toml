@@ -1,0 +1,11 @@
+# Streamlit theme — light-mode baseline. The full Modernist look is applied
+# via CSS injection in app.py; this file just ensures Streamlit's built-in
+# widget internals (dropdown chevrons, slider thumbs, etc.) start from
+# harmonious base colors.
+[theme]
+base = "light"
+primaryColor = "#ec3013"
+backgroundColor = "#f3f2f2"
+secondaryBackgroundColor = "#eae9e9"
+textColor = "#201e1d"
+font = "sans serif"

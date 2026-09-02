@@ -2638,6 +2638,158 @@ iframe[title="streamlit_back_camera_input.back_camera_input"] {
 .fit-maybe-fill { background: var(--color-accent); }
 .fit-skip { color: var(--color-skip); border-color: var(--color-skip); }
 .fit-skip-fill { background: var(--color-skip); }
+
+/* Trade card (design 7a) — left-edge status bar communicates whose move it is */
+.trade-card {
+    display: flex;
+    padding: 0;
+    margin-bottom: 12px;
+    border-bottom: 2px solid var(--color-divider);
+}
+.trade-card-bar {
+    width: 3px;
+    flex: none;
+    align-self: stretch;
+}
+.trade-card-bar-your-move { background: var(--color-accent); }
+.trade-card-bar-agreed    { background: var(--color-buy); }
+.trade-card-bar-waiting   { background: var(--color-divider-strong); }
+.trade-card-body {
+    flex: 1;
+    padding: 14px 4px 16px 14px;
+    min-width: 0;
+}
+.trade-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.trade-card-name {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 17px;
+    color: var(--color-text);
+}
+.trade-card-status {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 12px;
+    text-align: right;
+    flex: none;
+}
+.trade-card-status-your-move { color: var(--color-accent); }
+.trade-card-status-agreed    { color: var(--color-buy); }
+.trade-card-status-waiting   { color: var(--color-text-muted); }
+.trade-card-swap {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 10px;
+    align-items: center;
+}
+.trade-card-side-label {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+.trade-card-side-value {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--color-text);
+    line-height: 1.3;
+}
+.trade-card-swap-icon {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    color: var(--color-accent);
+    font-size: 16px;
+    text-align: center;
+}
+
+/* Friend row (design 7a — SHELVES YOU CAN BROWSE section) */
+.friend-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 0;
+    border-bottom: 2px solid var(--color-divider);
+}
+.friend-row-avatar {
+    width: 44px; height: 44px; flex: none;
+    border: 2px solid var(--color-divider-strong);
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    color: var(--color-text);
+}
+.friend-row-main {
+    flex: 1;
+    min-width: 0;
+}
+.friend-row-name {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 15px;
+    color: var(--color-text);
+}
+.friend-row-meta {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+}
+.friend-row-hook {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--color-accent);
+    margin-top: 3px;
+}
+
+/* Trade state stepper (design 7b) — 01 Proposed → 02 Accepted → 03 Shipped → 04 Received */
+.trade-stepper {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    padding: 0;
+    border-top: 2px solid var(--color-divider);
+    border-bottom: 2px solid var(--color-divider);
+    margin: 14px 0 18px;
+}
+.trade-step {
+    padding: 14px 8px;
+    border-right: 2px solid var(--color-divider);
+}
+.trade-step:last-child { border-right: 0; }
+.trade-step-num {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--color-text-dim);
+    margin-bottom: 4px;
+}
+.trade-step-name {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+.trade-step-active .trade-step-num,
+.trade-step-active .trade-step-name {
+    color: var(--color-accent);
+}
+.trade-step-active .trade-step-name {
+    font-weight: 800;
+}
+.trade-step-done .trade-step-num,
+.trade-step-done .trade-step-name {
+    color: var(--color-buy);
+}
 """
 
 _theme_tokens = _DARK_TOKENS if st.session_state.theme_mode == "dark" else _LIGHT_TOKENS
@@ -4076,7 +4228,15 @@ with tab_add:
             height=0,
         )
 
-    st.write("Take or upload a photo of the bottle, or enter manually.")
+    # ---- Header (matches other screens in Modernist style) ----
+    st.html(
+        '<div style="padding: 4px 0 6px">'
+        '  <div class="shelf-header-title">Add a bottle</div>'
+        '  <div class="mono-kicker-muted" style="margin-top: 4px">SNAP · UPLOAD · TYPE</div>'
+        '</div>'
+        '<div style="border-bottom: 2px solid var(--color-divider); margin: 6px 0 18px"></div>'
+    )
+    st.caption("Take or upload a photo of the bottle, or enter manually below.")
 
     if "camera_open" not in st.session_state:
         st.session_state.camera_open = False
@@ -4553,6 +4713,13 @@ with tab_prefs:
 with tab_friends:
     others = list_other_users(db, current_user)
 
+    # ---- Header (design 7a) ----
+    hdr_l, hdr_r = st.columns([3, 1])
+    with hdr_l:
+        st.html('<div class="shelf-header-title" style="padding: 4px 0 12px">Friends</div>')
+    with hdr_r:
+        st.write("")
+
     # Sub-tabs to keep the friend view, trade proposing, and trade tracking separate
     sub_view, sub_inbox, sub_outbox, sub_progress, sub_history = st.tabs([
         "Browse friends", "Inbox", "Sent", "In progress", "History"
@@ -4568,59 +4735,200 @@ with tab_friends:
             qty_label = f" × {qty}" if qty > 1 else ""
             st.markdown(f"- **{it['bottle_name']}**{qty_label}")
 
+    def _items_to_html_list(items: List[Dict]) -> str:
+        """Render trade items as compact HTML list for use inside trade cards."""
+        if not items:
+            return '<div class="trade-card-side-value" style="opacity:0.5">— nothing —</div>'
+        lines = []
+        for it in items:
+            qty = int(it.get("quantity", 1))
+            qty_label = f" × {qty}" if qty > 1 else ""
+            name = it["bottle_name"].replace("<", "&lt;").replace(">", "&gt;")
+            lines.append(f'<div class="trade-card-side-value">{name}{qty_label}</div>')
+        return "".join(lines)
+
+    def _render_trade_card_header(sender_display: str, status_kind: str,
+                                    status_label: str, offered: List[Dict],
+                                    requested: List[Dict], from_perspective: str = "recipient"):
+        """
+        Render the design-7a colored-bar trade card header.
+        status_kind: 'your-move', 'agreed', or 'waiting'
+        from_perspective: 'recipient' if the current user is receiving the offer,
+                          'sender' if the current user sent it.
+        """
+        # Perspective determines which side is "You give" vs "You get"
+        if from_perspective == "recipient":
+            you_give = requested
+            you_get = offered
+        else:
+            you_give = offered
+            you_get = requested
+
+        safe_sender = sender_display.replace("<", "&lt;").replace(">", "&gt;")
+        safe_status = status_label.replace("<", "&lt;").replace(">", "&gt;")
+
+        st.html(
+            f'<div class="trade-card">'
+            f'  <div class="trade-card-bar trade-card-bar-{status_kind}"></div>'
+            f'  <div class="trade-card-body">'
+            f'    <div class="trade-card-header">'
+            f'      <div class="trade-card-name">{safe_sender}</div>'
+            f'      <div class="trade-card-status trade-card-status-{status_kind}">{safe_status}</div>'
+            f'    </div>'
+            f'    <div class="trade-card-swap">'
+            f'      <div>'
+            f'        <div class="trade-card-side-label">YOU GIVE</div>'
+            f'        {_items_to_html_list(you_give)}'
+            f'      </div>'
+            f'      <div class="trade-card-swap-icon">⇄</div>'
+            f'      <div>'
+            f'        <div class="trade-card-side-label">YOU GET</div>'
+            f'        {_items_to_html_list(you_get)}'
+            f'      </div>'
+            f'    </div>'
+            f'  </div>'
+            f'</div>'
+        )
+
     # ---- BROWSE: pick a friend, see their shelf, propose a trade ----
     with sub_view:
         if not others:
             st.info("No other users yet. Share your invite code to get friends on board.")
         else:
-            friend_display = st.selectbox(
-                "View friend's shelf",
-                options=[""] + others,
-                key="friend_view_select",
+            # Design 7a: open trades count + shelves list
+            # Show a compact overview of active trades at the top (whose move it is)
+            my_key = normalize_username(current_user)
+            my_active_trades = [
+                t for t in trades_for_user(db, current_user)
+                if t["status"] in ("pending", "accepted")
+            ]
+
+            if my_active_trades:
+                st.html(
+                    f'<div class="mono-kicker" style="padding: 4px 0 8px">'
+                    f'OPEN TRADES — {len(my_active_trades)}'
+                    f'</div>'
+                )
+                for t in my_active_trades[:5]:
+                    is_from = t["from_user"] == my_key
+                    other_key = t["to_user"] if is_from else t["from_user"]
+                    other_display = display_name_for(db, other_key)
+
+                    # Determine status kind + label
+                    if t["status"] == "pending":
+                        if is_from:
+                            kind, label = "waiting", "Awaiting their answer"
+                        else:
+                            kind, label = "your-move", "Your move"
+                    else:  # accepted (in progress)
+                        i_shipped = t.get("from_shipped" if is_from else "to_shipped", False)
+                        they_shipped = t.get("to_shipped" if is_from else "from_shipped", False)
+                        i_received = t.get("from_received" if is_from else "to_received", False)
+                        if not i_shipped:
+                            kind, label = "your-move", "Your move — ship it"
+                        elif they_shipped and not i_received:
+                            kind, label = "your-move", "Your move — confirm received"
+                        elif not they_shipped:
+                            kind, label = "waiting", "Waiting on them to ship"
+                        else:
+                            kind, label = "agreed", "Agreed — moving"
+
+                    _render_trade_card_header(
+                        other_display, kind, label,
+                        t["offered"], t["requested"],
+                        from_perspective="sender" if is_from else "recipient",
+                    )
+
+                st.caption("Manage trades in the Inbox / Sent / In progress tabs above.")
+                st.html('<div style="height: 20px"></div>')
+
+            # Shelves you can browse (design 7a lower section)
+            st.html(
+                '<div class="mono-kicker-muted" style="padding: 4px 0 8px">'
+                'SHELVES YOU CAN BROWSE'
+                '</div>'
             )
-            if friend_display:
+
+            for friend_display in others:
                 friend_key = normalize_username(friend_display)
-                friend_bottles_all = [
-                    b for b in get_user_bottles(db, friend_display) if b.quantity > 0
-                ]
-                friend_sealed = [b for b in friend_bottles_all if b.sealed]
+                friend_bottles = get_user_bottles(db, friend_display)
+                total = len([b for b in friend_bottles if b.quantity > 0])
+                sealed_count = len([b for b in friend_bottles if b.sealed and b.quantity > 0])
 
-                colA, colB = st.columns([3, 2])
-                colA.caption(f"{friend_display}'s shelf — read only")
-                if friend_sealed:
-                    if colB.button(
-                        "🤝 Propose a trade",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"open_trade_{friend_key}",
-                    ):
-                        st.session_state["trade_target"] = friend_key
-                        st.session_state["trade_target_display"] = friend_display
-                        # Reset selections from any prior session
-                        st.session_state.pop("trade_request_picks", None)
-                        st.session_state.pop("trade_offer_picks", None)
-                        st.session_state.pop("trade_message", None)
-                        st.rerun()
-                else:
-                    colB.caption("_No sealed bottles to trade for._")
+                initials = "".join([w[0].upper() for w in friend_display.split()[:2]]) or friend_display[:2].upper()
 
-                if not friend_bottles_all:
-                    st.caption(f"{friend_display} hasn't added any bottles yet.")
-                else:
-                    for b in friend_bottles_all:
-                        with st.container(border=True):
-                            title = f"**{b.name}**"
+                # Hook line: something interesting to draw the user in
+                hook = ""
+                if sealed_count > 0:
+                    # Check if any of their sealed bottles aren't in my inventory
+                    my_bottle_names_lower = {b.name.lower() for b in inventory}
+                    their_sealed_not_mine = [
+                        b for b in friend_bottles
+                        if b.sealed and b.quantity > 0
+                        and b.name.lower() not in my_bottle_names_lower
+                    ]
+                    if their_sealed_not_mine:
+                        n = len(their_sealed_not_mine)
+                        hook = f"{n} sealed you don't have"
+
+                safe_display = friend_display.replace("<", "&lt;").replace(">", "&gt;")
+                safe_hook = hook.replace("<", "&lt;").replace(">", "&gt;")
+
+                st.html(
+                    f'<div class="friend-row">'
+                    f'  <div class="friend-row-avatar">{initials}</div>'
+                    f'  <div class="friend-row-main">'
+                    f'    <div class="friend-row-name">{safe_display}</div>'
+                    f'    <div class="friend-row-meta">{total} bottle{"s" if total != 1 else ""} · {sealed_count} sealed</div>'
+                    f'    {f"<div class=\"friend-row-hook\">{safe_hook}</div>" if safe_hook else ""}'
+                    f'  </div>'
+                    f'</div>'
+                )
+
+                # Expander to open the shelf inline
+                is_open = st.session_state.get(f"friend_open_{friend_key}", False)
+                if st.button(
+                    "Hide shelf" if is_open else "Open shelf",
+                    key=f"friend_toggle_{friend_key}",
+                    use_container_width=True,
+                ):
+                    st.session_state[f"friend_open_{friend_key}"] = not is_open
+                    st.rerun()
+
+                if is_open:
+                    friend_sealed = [b for b in friend_bottles if b.sealed and b.quantity > 0]
+                    if friend_sealed:
+                        propose_col = st.columns([2, 1])[1]
+                        if propose_col.button(
+                            "🤝 Propose trade",
+                            type="primary",
+                            use_container_width=True,
+                            key=f"open_trade_{friend_key}",
+                        ):
+                            st.session_state["trade_target"] = friend_key
+                            st.session_state["trade_target_display"] = friend_display
+                            st.session_state.pop("trade_request_picks", None)
+                            st.session_state.pop("trade_offer_picks", None)
+                            st.session_state.pop("trade_message", None)
+                            st.rerun()
+
+                    if not friend_bottles:
+                        st.caption(f"{friend_display} hasn't added any bottles yet.")
+                    else:
+                        for b in [b for b in friend_bottles if b.quantity > 0]:
+                            safe_name = b.name.replace("<", "&lt;").replace(">", "&gt;")
+                            pick_tag = ""
                             if b.private_pick and b.pick_group:
-                                title += f" — _{b.pick_group} pick_"
-                            st.markdown(title)
-                            st.caption(
-                                f"{b.type} · {b.proof}° · {b.fill_percent:.0f}% full · "
-                                f"{'sealed 🔒' if b.sealed else 'open'} · qty {b.quantity}"
+                                pick_tag = f'<span class="mono-kicker" style="margin-left: 6px">{b.pick_group.upper()} PICK</span>'
+                            sealed_tag = " 🔒" if b.sealed else ""
+                            st.html(
+                                f'<div style="padding: 10px 0; border-bottom: 1px solid var(--color-divider)">'
+                                f'  <div style="font-family: Archivo; font-weight: 700; font-size: 14px">{safe_name}{sealed_tag}{pick_tag}</div>'
+                                f'  <div style="font-family: JetBrains Mono, ui-monospace, monospace; font-weight: 500; font-size: 10px; letter-spacing: 0.08em; color: var(--color-text-muted); margin-top: 3px; text-transform: uppercase">'
+                                f'    {b.type} · {b.proof:.0f}° · {b.fill_percent:.0f}%'
+                                f'  </div>'
+                                f'</div>'
                             )
-                            if b.my_tasting_notes:
-                                st.caption(f"Their notes: {', '.join(b.my_tasting_notes)}")
-                            elif b.world_tasting_notes:
-                                st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
 
             # Trade composer (appears below browser when a trade is in progress)
             if st.session_state.get("trade_target"):
@@ -4744,18 +5052,15 @@ with tab_friends:
 
         for t in pending_in:
             sender_display = display_name_for(db, t["from_user"])
+            # Design 7a — amber left-edge status bar for "your move"
+            _render_trade_card_header(
+                sender_display, "your-move", "Your move",
+                t["offered"], t["requested"],
+                from_perspective="recipient",
+            )
             with st.container(border=True):
-                st.markdown(f"### From **{sender_display}**")
                 if t.get("message"):
                     st.markdown(f"_\"{t['message']}\"_")
-
-                col_o, col_r = st.columns(2)
-                with col_o:
-                    st.markdown(f"**They give you:**")
-                    _render_items(t["offered"], sender_display)
-                with col_r:
-                    st.markdown(f"**You give them:**")
-                    _render_items(t["requested"], "You")
 
                 accept_col, decline_col, counter_col = st.columns(3)
                 if accept_col.button("✅ Accept", key=f"acc_{t['id']}", type="primary", use_container_width=True):
@@ -4865,18 +5170,14 @@ with tab_friends:
             st.caption("Nothing waiting on a friend's response.")
         for t in pending_out:
             recipient_display = display_name_for(db, t["to_user"])
+            _render_trade_card_header(
+                recipient_display, "waiting", "Awaiting their answer",
+                t["offered"], t["requested"],
+                from_perspective="sender",
+            )
             with st.container(border=True):
-                st.markdown(f"### To **{recipient_display}**")
                 if t.get("message"):
                     st.markdown(f"_\"{t['message']}\"_")
-
-                col_o, col_r = st.columns(2)
-                with col_o:
-                    st.markdown("**You're offering:**")
-                    _render_items(t["offered"], "You")
-                with col_r:
-                    st.markdown(f"**You want from {recipient_display}:**")
-                    _render_items(t["requested"], recipient_display)
 
                 if st.button("🚫 Cancel offer", key=f"cancel_{t['id']}"):
                     err = cancel_trade(db, t["id"], current_user)
@@ -4918,8 +5219,56 @@ with tab_friends:
                 they_shipped = t.get("from_shipped", False)
                 they_received = t.get("from_received", False)
 
+            # Determine status for the header + stepper
+            if not i_shipped:
+                status_kind, status_label = "your-move", "Your move — ship it"
+                active_step = 2  # Accepted done, on to Shipped
+            elif they_shipped and not i_received:
+                status_kind, status_label = "your-move", "Your move — confirm received"
+                active_step = 3  # Shipped done, on to Received
+            elif not they_shipped:
+                status_kind, status_label = "waiting", "Waiting on them to ship"
+                active_step = 2
+            else:
+                status_kind, status_label = "agreed", "Both received — completing…"
+                active_step = 4
+
+            _render_trade_card_header(
+                f"Trade with {other_display}", status_kind, status_label,
+                t["offered"], t["requested"],
+                from_perspective="sender" if is_from else "recipient",
+            )
+
+            # Design 7b — 4-step stepper
+            def _step_class(n: int, active: int) -> str:
+                if n < active:
+                    return "trade-step trade-step-done"
+                elif n == active:
+                    return "trade-step trade-step-active"
+                return "trade-step"
+
+            st.html(
+                f'<div class="trade-stepper">'
+                f'  <div class="{_step_class(1, active_step)}">'
+                f'    <div class="trade-step-num">01</div>'
+                f'    <div class="trade-step-name">Proposed</div>'
+                f'  </div>'
+                f'  <div class="{_step_class(2, active_step)}">'
+                f'    <div class="trade-step-num">02</div>'
+                f'    <div class="trade-step-name">Accepted</div>'
+                f'  </div>'
+                f'  <div class="{_step_class(3, active_step)}">'
+                f'    <div class="trade-step-num">03</div>'
+                f'    <div class="trade-step-name">Shipped</div>'
+                f'  </div>'
+                f'  <div class="{_step_class(4, active_step)}">'
+                f'    <div class="trade-step-num">04</div>'
+                f'    <div class="trade-step-name">Received</div>'
+                f'  </div>'
+                f'</div>'
+            )
+
             with st.container(border=True):
-                st.markdown(f"### Trade with **{other_display}**")
                 if t.get("message"):
                     st.markdown(f"_\"{t['message']}\"_")
 

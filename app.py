@@ -2553,6 +2553,91 @@ iframe[title="streamlit_back_camera_input.back_camera_input"] {
 .shelf-tile-fill.running-low {
     color: var(--color-accent);
 }
+
+/* Bar ranked row (design 6a) */
+.bar-row {
+    padding: 14px 0 16px;
+    border-bottom: 2px solid var(--color-divider);
+}
+.bar-row-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.bar-row-rank {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--color-accent);
+    padding-top: 3px;
+    flex: none;
+    width: 22px;
+}
+.bar-row-main {
+    flex: 1;
+    min-width: 0;
+}
+.bar-row-name {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 18px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+}
+.bar-row-sub {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 12px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+}
+.bar-row-price {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 18px;
+    flex: none;
+    padding-top: 1px;
+}
+.bar-row-reason {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--color-text);
+    margin: 10px 0 12px;
+    padding-left: 32px;
+    text-wrap: pretty;
+}
+.bar-row-fit {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-left: 32px;
+}
+.bar-row-fit-label {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    padding: 3px 7px;
+    border: 1px solid;
+    flex: none;
+    text-transform: uppercase;
+}
+.bar-row-fit-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--color-divider);
+    overflow: hidden;
+}
+.bar-row-fit-bar-fill {
+    height: 100%;
+}
+.fit-good { color: var(--color-buy); border-color: var(--color-buy); }
+.fit-good-fill { background: var(--color-buy); }
+.fit-maybe { color: var(--color-accent); border-color: var(--color-accent); }
+.fit-maybe-fill { background: var(--color-accent); }
+.fit-skip { color: var(--color-skip); border-color: var(--color-skip); }
+.fit-skip-fill { background: var(--color-skip); }
 """
 
 _theme_tokens = _DARK_TOKENS if st.session_state.theme_mode == "dark" else _LIGHT_TOKENS
@@ -2584,72 +2669,138 @@ if st.session_state.user is None:
 
 # --- Auth screens ---
 if st.session_state.user is None:
-    # --- Hero ---
-    st.markdown(
-        """
-        <div style="text-align: center; padding: 1.5rem 0 0.5rem 0;">
-            <div style="font-size: 4rem; line-height: 1;">🥃</div>
-            <h1 style="margin: 0.5rem 0 0.25rem 0; font-size: 2rem;">
-                What Should I Pour?
-            </h1>
-            <p style="color: #888; margin: 0; font-size: 1.05rem;">
-                Your personal whiskey shelf — smarter pours, less guesswork.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # --- Three-up "what you get" pitch ---
-    feat_col1, feat_col2, feat_col3 = st.columns(3)
-    with feat_col1:
-        st.markdown(
-            "<div style='text-align:center; padding: 0.5rem 0;'>"
-            "<div style='font-size:1.6rem;'>📷</div>"
-            "<div style='font-size:0.85rem; color:#aaa;'>Snap to add a bottle</div>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    with feat_col2:
-        st.markdown(
-            "<div style='text-align:center; padding: 0.5rem 0;'>"
-            "<div style='font-size:1.6rem;'>✨</div>"
-            "<div style='font-size:0.85rem; color:#aaa;'>Pick by mood, not menu</div>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-    with feat_col3:
-        st.markdown(
-            "<div style='text-align:center; padding: 0.5rem 0;'>"
-            "<div style='font-size:1.6rem;'>🧊</div>"
-            "<div style='font-size:0.85rem; color:#aaa;'>Track every pour</div>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    st.divider()
-
-    # --- Signup is the default mode ---
+    # Signup is the default mode
     if "auth_view" not in st.session_state:
         st.session_state.auth_view = "signup"
 
-    if st.session_state.auth_view == "signup":
-        st.subheader("Create your account")
-        st.caption("Got an invite code from a friend? You're in the right place.")
+    if st.session_state.auth_view == "login":
+        # ---- Sign in (design 8a) ----
+        st.html(
+            '<div style="padding: 60px 0 40px">'
+            '  <div class="mono-kicker" style="font-size: 10px">WHAT SHOULD I POUR</div>'
+            '  <div style="'
+            '    font-family: Archivo, system-ui, sans-serif;'
+            '    font-weight: 800;'
+            '    font-size: 52px;'
+            '    line-height: 1.02;'
+            '    letter-spacing: -0.03em;'
+            '    color: var(--color-text);'
+            '    margin-top: 18px;'
+            '  ">Welcome<br>back.</div>'
+            '</div>'
+            '<div style="height: 2px; background: var(--color-divider); margin: 0 0 28px"></div>'
+        )
 
-        new_u = st.text_input("Username", key="signup_user", placeholder="how friends will know you")
-        new_p = st.text_input("Password", type="password", key="signup_pw", placeholder="at least 6 characters")
-        new_p2 = st.text_input("Confirm password", type="password", key="signup_pw2")
+        st.html('<div class="mono-kicker-muted" style="padding: 0 0 6px">USERNAME</div>')
+        u = st.text_input("Username", key="login_user", label_visibility="collapsed", placeholder="rachel")
+
+        st.html('<div class="mono-kicker-muted" style="padding: 12px 0 6px">PASSWORD</div>')
+        p = st.text_input("Password", type="password", key="login_pw", label_visibility="collapsed", placeholder="••••••••")
+
+        remember_login = st.checkbox(
+            "Keep me signed in for 30 days", value=True, key="login_remember",
+        )
+
+        st.html('<div style="height: 6px"></div>')
+        if st.button("Sign in", type="primary", use_container_width=True, key="login_submit"):
+            if verify_user(db, u, p):
+                _user_key = normalize_username(u)
+                st.session_state.user = _user_key
+                if remember_login:
+                    _token = create_session(_user_key)
+                    if _token:
+                        _ctrl = get_cookie_controller()
+                        if _ctrl is not None:
+                            try:
+                                _ctrl.set(
+                                    SESSION_COOKIE_NAME, _token,
+                                    max_age=SESSION_DAYS * 86400,
+                                )
+                                st.session_state.session_token = _token
+                            except Exception:
+                                pass
+                st.rerun()
+            else:
+                st.error("Wrong username or password.")
+
+        # Footer: "New here?" + create account button (design 8a)
+        st.html(
+            '<div style="height: 2px; background: var(--color-divider); margin: 40px 0 20px"></div>'
+            '<div style="font-family: Archivo, system-ui, sans-serif; font-size: 14px; color: var(--color-text-muted); margin-bottom: 12px">'
+            "New here? You'll need the invite code from whoever runs the shelf."
+            '</div>'
+        )
+        if st.button("Create an account", key="switch_to_signup", use_container_width=False):
+            st.session_state.auth_view = "signup"
+            st.rerun()
+
+    else:  # signup view (design 8b)
+        # ---- Sign up header ----
+        header_l, header_r = st.columns([1, 6])
+        with header_l:
+            if st.button("←", key="signup_back", use_container_width=True):
+                st.session_state.auth_view = "login"
+                st.rerun()
+        with header_r:
+            st.html(
+                '<div style="'
+                'font-family: Archivo, system-ui, sans-serif;'
+                'font-weight: 800;'
+                'font-size: 18px;'
+                'padding: 6px 0;'
+                'color: var(--color-text);'
+                '">Create an account</div>'
+            )
+        st.html('<div style="height: 2px; background: var(--color-divider); margin: 4px 0 24px"></div>')
+
+        # Invite code (highlighted with amber kicker, per design)
+        st.html('<div class="mono-kicker" style="padding: 0 0 6px">INVITE CODE</div>')
         code = st.text_input(
             "Invite code",
             key="signup_code",
-            placeholder="paste the code your friend sent",
+            placeholder="TYPE THE CODE",
+            label_visibility="collapsed",
         )
+        st.caption("Ask whoever invited you — it's shared privately and rotates.")
+
+        st.html('<div style="height: 2px; background: var(--color-divider); margin: 18px 0"></div>')
+
+        st.html('<div class="mono-kicker-muted" style="padding: 0 0 6px">USERNAME</div>')
+        new_u = st.text_input(
+            "Username",
+            key="signup_user",
+            placeholder="How friends will find you",
+            label_visibility="collapsed",
+        )
+
+        st.html('<div class="mono-kicker-muted" style="padding: 12px 0 6px">PASSWORD</div>')
+        new_p = st.text_input(
+            "Password",
+            type="password",
+            key="signup_pw",
+            placeholder="At least 6 characters",
+            label_visibility="collapsed",
+        )
+        st.caption(
+            "Hashed with a per-account salt. Nobody, including whoever runs "
+            "the shelf, can read it back."
+        )
+
+        st.html('<div class="mono-kicker-muted" style="padding: 12px 0 6px">CONFIRM PASSWORD</div>')
+        new_p2 = st.text_input(
+            "Confirm password",
+            type="password",
+            key="signup_pw2",
+            label_visibility="collapsed",
+            placeholder="••••••••",
+        )
+
         remember_signup = st.checkbox(
             "Keep me signed in for 30 days", value=True, key="signup_remember",
         )
 
-        if st.button("Create my account 🥃", type="primary", use_container_width=True):
+        st.html('<div style="height: 16px"></div>')
+        if st.button("Create account", type="primary", use_container_width=True, key="signup_submit"):
             expected_code = st.secrets.get("signup_code", "")
             new_u_clean = new_u.strip()
             new_u_key = normalize_username(new_u_clean)
@@ -2681,57 +2832,7 @@ if st.session_state.user is None:
                                 st.session_state.session_token = _token
                             except Exception:
                                 pass
-                st.toast(f"Welcome, {new_u_clean}! 🥃", icon="🎉")
-                st.rerun()
-
-        st.divider()
-        already_col = st.columns([1, 2, 1])[1]
-        with already_col:
-            if st.button(
-                "Already have an account? Sign in",
-                use_container_width=True,
-                key="switch_to_login",
-            ):
-                st.session_state.auth_view = "login"
-                st.rerun()
-
-    else:  # login view
-        st.subheader("Welcome back")
-        u = st.text_input("Username", key="login_user")
-        p = st.text_input("Password", type="password", key="login_pw")
-        remember_login = st.checkbox(
-            "Keep me signed in for 30 days", value=True, key="login_remember",
-        )
-        if st.button("Sign in 🥃", type="primary", use_container_width=True):
-            if verify_user(db, u, p):
-                _user_key = normalize_username(u)
-                st.session_state.user = _user_key
-                if remember_login:
-                    _token = create_session(_user_key)
-                    if _token:
-                        _ctrl = get_cookie_controller()
-                        if _ctrl is not None:
-                            try:
-                                _ctrl.set(
-                                    SESSION_COOKIE_NAME, _token,
-                                    max_age=SESSION_DAYS * 86400,
-                                )
-                                st.session_state.session_token = _token
-                            except Exception:
-                                pass
-                st.rerun()
-            else:
-                st.error("Wrong username or password.")
-
-        st.divider()
-        new_col = st.columns([1, 2, 1])[1]
-        with new_col:
-            if st.button(
-                "New here? Create an account",
-                use_container_width=True,
-                key="switch_to_signup",
-            ):
-                st.session_state.auth_view = "signup"
+                st.toast(f"Welcome, {new_u_clean}!", icon="🎉")
                 st.rerun()
 
     st.stop()
@@ -3034,24 +3135,44 @@ with tab_recommend:
 
 # --- At the Bar ---
 with tab_bar:
-    st.markdown("### 🍻 At a bar?")
-    st.caption(
-        "Snap the menu or the backbar shelf and I'll rank what to order based on "
-        "your taste. Bottles you already have at home get flagged."
-    )
+    # ---- Header: "← At the bar" + "Shoot menu" primary button ----
+    hdr_l, hdr_r = st.columns([2, 1])
+    with hdr_l:
+        st.html('<div class="shelf-header-title" style="padding: 4px 0 6px">At the bar</div>')
+    with hdr_r:
+        st.write("")
+        # We render this as informational text; the actual button is below
+        st.html(
+            '<div class="mono-kicker-muted" style="text-align: right; padding: 8px 0">'
+            'SNAP TO RANK'
+            '</div>'
+        )
 
-    source = st.radio(
-        "What are you photographing?",
-        options=["Menu", "Shelf"],
-        horizontal=True,
-        key="bar_source",
-        help=(
-            "Menus are typically more accurate (printed text). "
-            "Shelves work but depend on label visibility and lighting."
-        ),
-    )
+    # ---- Menu / Backbar segmented toggle (matches design's Menu photo / Backbar photo tabs) ----
+    if "bar_source" not in st.session_state:
+        st.session_state.bar_source = "Menu"
+    src_l, src_r = st.columns(2)
+    with src_l:
+        if st.button(
+            "Menu photo",
+            key="bar_src_menu",
+            type="primary" if st.session_state.bar_source == "Menu" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.bar_source = "Menu"
+            st.rerun()
+    with src_r:
+        if st.button(
+            "Backbar photo",
+            key="bar_src_shelf",
+            type="primary" if st.session_state.bar_source == "Shelf" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.bar_source = "Shelf"
+            st.rerun()
+    source = st.session_state.bar_source
 
-    # Camera/upload
+    # ---- Camera/upload row ----
     if "bar_camera_open" not in st.session_state:
         st.session_state.bar_camera_open = False
     if "bar_uploader_version" not in st.session_state:
@@ -3105,7 +3226,7 @@ with tab_bar:
     )
 
     if bar_image_bytes is not None and st.button(
-        "🔎 Analyze and recommend",
+        f"🔎 Analyze {source.lower()}",
         type="primary",
         use_container_width=True,
         key="bar_analyze",
@@ -3135,7 +3256,6 @@ with tab_bar:
             for d in detected:
                 owned = find_owned_match(d.get("name", ""), inventory)
                 score = score_bar_bottle(d, prefs)
-                # Small bump for owned matches so they surface (you know you like them)
                 if owned:
                     score += 0.05
                 scored.append({
@@ -3146,67 +3266,178 @@ with tab_bar:
                 })
             scored.sort(key=lambda x: x["score"], reverse=True)
 
-            st.divider()
-            st.markdown(
-                f"#### Top picks from this {st.session_state.get('bar_source_used', source).lower()}"
-            )
-            st.caption(
-                f"Found **{len(detected)}** bottle"
-                f"{'s' if len(detected) != 1 else ''} · ranked by fit to your taste"
+            # ---- Menu info bar (design 6a) ----
+            source_used = st.session_state.get('bar_source_used', source)
+            st.html(
+                f'<div style="'
+                f'  display: flex; align-items: center; gap: 12px;'
+                f'  padding: 14px 0; margin-top: 18px;'
+                f'  border-top: 2px solid var(--color-divider);'
+                f'  border-bottom: 2px solid var(--color-divider);'
+                f'">'
+                f'  <div style="'
+                f'    width: 40px; height: 40px; flex: none;'
+                f'    background: repeating-linear-gradient(135deg,'
+                f'      var(--color-surface-2) 0 4px,'
+                f'      var(--color-surface) 4px 8px);'
+                f'  "></div>'
+                f'  <div style="flex: 1">'
+                f'    <div style="font-family: Archivo; font-weight: 800; font-size: 15px; color: var(--color-text)">'
+                f'      {source_used} scan'
+                f'    </div>'
+                f'    <div class="mono-kicker-muted" style="margin-top: 2px">'
+                f'      {len(detected)} OF {len(detected)} POURS READ'
+                f'    </div>'
+                f'  </div>'
+                f'</div>'
             )
 
-            for r in scored[:3]:
+            # ---- BEST THREE FOR YOU ----
+            st.html(
+                '<div class="mono-kicker" style="padding: 20px 0 6px">'
+                'BEST THREE FOR YOU'
+                '</div>'
+            )
+
+            # Render top 3 as designed ranked rows with fit bars
+            for i, r in enumerate(scored[:3], start=1):
                 d = r["detected"]
-                with st.container(border=True):
-                    title = f"### {d.get('name', 'Unknown')}"
-                    st.markdown(title)
+                name = (d.get("name") or "Unknown").replace("<", "&lt;").replace(">", "&gt;")
 
-                    meta_parts = [d.get("type", "spirit")]
-                    if d.get("proof"):
-                        meta_parts.append(f"{d['proof']:.0f}°")
-                    if d.get("price"):
-                        meta_parts.append(f"${d['price']:.2f}")
-                    st.caption(" · ".join(meta_parts))
+                # Fit tier + color
+                sc = r["score"]
+                if sc >= 0.7:
+                    fit_class = "fit-good"
+                    fit_fill_class = "fit-good-fill"
+                    price_color = "var(--color-buy)"
+                elif sc >= 0.45:
+                    fit_class = "fit-maybe"
+                    fit_fill_class = "fit-maybe-fill"
+                    price_color = "var(--color-accent)"
+                else:
+                    fit_class = "fit-skip"
+                    fit_fill_class = "fit-skip-fill"
+                    price_color = "var(--color-skip)"
 
-                    if r["owned"]:
-                        st.info(
-                            f"🏠 **You already have this at home** "
-                            f"({r['owned'].fill_percent:.0f}% full, qty {r['owned'].quantity})"
-                        )
+                fit_pct = int(max(0, min(100, sc * 100)))
 
-                    st.markdown(f"**Why:** {r['reason']}.")
+                # Sub line
+                sub_parts = []
+                if d.get("type"):
+                    sub_parts.append(d["type"].title())
+                if d.get("proof"):
+                    sub_parts.append(f"{d['proof']:.0f}°")
+                sub = " · ".join(sub_parts)
 
-                    if d.get("tasting_notes"):
-                        st.caption(f"Common notes: {', '.join(d['tasting_notes'])}")
+                # Price
+                price_html = ""
+                if d.get("price"):
+                    price_html = (
+                        f'<div class="bar-row-price" style="color: {price_color}">'
+                        f'${d["price"]:.0f}'
+                        f'</div>'
+                    )
 
-                    conf = float(d.get("confidence", 0))
-                    if conf < 0.6:
-                        st.caption(
-                            f"_Low identification confidence ({int(conf * 100)}%) — "
-                            f"the bartender may be the better source for details._"
-                        )
+                # Owned badge inline
+                owned_badge = ""
+                if r["owned"]:
+                    owned_badge = ' <span class="mono-kicker" style="margin-left: 6px">🏠 OWNED</span>'
 
-            # See-all expander
+                reason = (r["reason"].rstrip(".") + ".").replace("<", "&lt;").replace(">", "&gt;")
+
+                st.html(
+                    f'<div class="bar-row">'
+                    f'  <div class="bar-row-top">'
+                    f'    <div class="bar-row-rank">{i:02d}</div>'
+                    f'    <div class="bar-row-main">'
+                    f'      <div class="bar-row-name">{name}{owned_badge}</div>'
+                    f'      <div class="bar-row-sub">{sub}</div>'
+                    f'    </div>'
+                    f'    {price_html}'
+                    f'  </div>'
+                    f'  <div class="bar-row-reason">{reason}</div>'
+                    f'  <div class="bar-row-fit">'
+                    f'    <div class="bar-row-fit-label {fit_class}">{fit_pct} FIT</div>'
+                    f'    <div class="bar-row-fit-bar"><div class="bar-row-fit-bar-fill {fit_fill_class}" style="width: {fit_pct}%"></div></div>'
+                    f'  </div>'
+                    f'</div>'
+                )
+
+            # ---- EVERYTHING ELSE ----
             if len(scored) > 3:
-                with st.expander(f"See all {len(scored)} detected bottles"):
-                    for r in scored:
+                remaining = len(scored) - 3
+                st.html(
+                    f'<div class="mono-kicker-muted" style="padding: 20px 0 6px">'
+                    f'EVERYTHING ELSE — {remaining}'
+                    f'</div>'
+                )
+                with st.expander(f"Show all {remaining} more"):
+                    for r in scored[3:]:
                         d = r["detected"]
-                        line = f"**{d.get('name', 'Unknown')}**"
-                        sub_bits = [d.get("type", "spirit")]
+                        name = (d.get("name") or "Unknown").replace("<", "&lt;").replace(">", "&gt;")
+                        sc = r["score"]
+                        if sc >= 0.7:
+                            fit_class = "fit-good"; fit_fill_class = "fit-good-fill"
+                            price_color = "var(--color-buy)"
+                        elif sc >= 0.45:
+                            fit_class = "fit-maybe"; fit_fill_class = "fit-maybe-fill"
+                            price_color = "var(--color-accent)"
+                        else:
+                            fit_class = "fit-skip"; fit_fill_class = "fit-skip-fill"
+                            price_color = "var(--color-skip)"
+                        fit_pct = int(max(0, min(100, sc * 100)))
+                        sub_parts = []
+                        if d.get("type"):
+                            sub_parts.append(d["type"].title())
                         if d.get("proof"):
-                            sub_bits.append(f"{d['proof']:.0f}°")
+                            sub_parts.append(f"{d['proof']:.0f}°")
+                        sub = " · ".join(sub_parts)
+                        price_html = ""
                         if d.get("price"):
-                            sub_bits.append(f"${d['price']:.2f}")
-                        sub_bits.append(f"score: {r['score']:.2f}")
+                            price_html = f'<div class="bar-row-price" style="color: {price_color}">${d["price"]:.0f}</div>'
+                        owned_badge = ""
+                        if r["owned"]:
+                            owned_badge = ' <span class="mono-kicker" style="margin-left: 6px">🏠</span>'
 
-                        owned_tag = " 🏠" if r["owned"] else ""
-                        st.markdown(f"{line}{owned_tag}")
-                        st.caption(" · ".join(sub_bits))
-                        if d.get("tasting_notes"):
-                            st.caption(f"_{', '.join(d['tasting_notes'])}_")
-                        st.markdown("---")
+                        st.html(
+                            f'<div class="bar-row" style="padding: 10px 0 12px">'
+                            f'  <div class="bar-row-top">'
+                            f'    <div class="bar-row-main">'
+                            f'      <div style="font-family: Archivo; font-weight: 700; font-size: 14px">{name}{owned_badge}</div>'
+                            f'      <div class="bar-row-sub">{sub}</div>'
+                            f'    </div>'
+                            f'    {price_html}'
+                            f'  </div>'
+                            f'  <div class="bar-row-fit" style="padding-left: 0; margin-top: 8px">'
+                            f'    <div class="bar-row-fit-label {fit_class}">{fit_pct} FIT</div>'
+                            f'    <div class="bar-row-fit-bar"><div class="bar-row-fit-bar-fill {fit_fill_class}" style="width: {fit_pct}%"></div></div>'
+                            f'  </div>'
+                            f'</div>'
+                        )
 
-            st.divider()
+            # ---- Legend + clear (design 6a footer) ----
+            st.html(
+                '<div style="'
+                '  display: flex; flex-wrap: wrap; gap: 14px; align-items: center;'
+                '  padding: 16px 0; margin-top: 10px;'
+                '  border-top: 2px solid var(--color-divider);'
+                '">'
+                '  <div style="display: inline-flex; align-items: center; gap: 6px">'
+                '    <span style="width: 10px; height: 10px; background: var(--color-buy); display: inline-block"></span>'
+                '    <span class="mono-kicker-muted">GOOD FIT</span>'
+                '  </div>'
+                '  <div style="display: inline-flex; align-items: center; gap: 6px">'
+                '    <span style="width: 10px; height: 10px; background: var(--color-accent); display: inline-block"></span>'
+                '    <span class="mono-kicker-muted">MAYBE</span>'
+                '  </div>'
+                '  <div style="display: inline-flex; align-items: center; gap: 6px">'
+                '    <span style="width: 10px; height: 10px; background: var(--color-skip); display: inline-block"></span>'
+                '    <span class="mono-kicker-muted">NOT FOR YOU</span>'
+                '  </div>'
+                '  <div class="mono-kicker-muted" style="margin-left: auto">PRICE TINTED BY FIT</div>'
+                '</div>'
+            )
+
             if st.button("Clear results and start over", key="bar_clear"):
                 st.session_state.pop("bar_detected", None)
                 st.session_state.pop("bar_source_used", None)
@@ -4093,33 +4324,186 @@ with tab_add:
 
 # --- Preferences ---
 with tab_prefs:
-    st.write("These shape the recommendations.")
-    profiles_raw = st.text_input(
-        "Liked flavor profiles (comma-separated)",
-        value=", ".join(prefs.liked_profiles), placeholder="caramel, oak, spice",
-    )
-    col1, col2 = st.columns(2)
-    pmin = col1.number_input(
-        "Min proof", 80.0, 160.0,
-        float(prefs.preferred_proof_min) if prefs.preferred_proof_min else 90.0,
-    )
-    pmax = col2.number_input(
-        "Max proof", 80.0, 160.0,
-        float(prefs.preferred_proof_max) if prefs.preferred_proof_max else 120.0,
+    # ---- Header: title + Save button (design 8c) ----
+    hdr_col, save_col = st.columns([3, 1])
+    with hdr_col:
+        st.html('<div class="shelf-header-title" style="padding: 4px 0 6px">Preferences</div>')
+
+    # ---- Notes you like — tag selector (design 8c) ----
+    # Canonical set matches the design's chip list, plus any custom notes
+    # the user has typed in the past
+    CANONICAL_NOTES = [
+        "toasted oak", "baking spice", "dark fruit", "caramel", "vanilla",
+        "honey", "peat smoke", "sherry", "leather", "tobacco",
+        "citrus", "green apple", "mint", "cocoa", "cinnamon", "brine",
+    ]
+
+    # Track selected notes in session_state, seeded from current prefs
+    if "prefs_selected_notes" not in st.session_state:
+        st.session_state.prefs_selected_notes = list(prefs.liked_profiles)
+
+    selected = st.session_state.prefs_selected_notes
+
+    # Build the display list: canonical set + any user-custom notes not in canonical
+    display_notes = list(CANONICAL_NOTES)
+    for n in selected:
+        if n and n.lower() not in [x.lower() for x in display_notes]:
+            display_notes.append(n)
+
+    # Kicker row: NOTES YOU LIKE ... N SELECTED
+    kicker_l, kicker_r = st.columns([3, 1])
+    kicker_l.html('<div class="mono-kicker-muted" style="padding: 12px 0 4px">NOTES YOU LIKE</div>')
+    kicker_r.html(
+        f'<div class="mono-kicker" style="text-align: right; padding: 12px 0 4px">'
+        f'{len(selected)} SELECTED'
+        f'</div>'
     )
 
-    if st.button("Save preferences", type="primary"):
+    st.caption(
+        "These weigh every recommendation. Your own tasting notes count for "
+        "more than the ones the app fills in."
+    )
+
+    # Render chips. Each chip is a Streamlit button — active state = primary (amber).
+    # We render 4 per row to match the design's wrap.
+    CHIPS_PER_ROW = 4
+    for start in range(0, len(display_notes), CHIPS_PER_ROW):
+        row_notes = display_notes[start:start + CHIPS_PER_ROW]
+        cols = st.columns(CHIPS_PER_ROW)
+        for i, note in enumerate(row_notes):
+            is_selected = note.lower() in [s.lower() for s in selected]
+            with cols[i]:
+                if st.button(
+                    note.title() if len(note) <= 14 else note,
+                    key=f"note_chip_{note}",
+                    type="primary" if is_selected else "secondary",
+                    use_container_width=True,
+                ):
+                    # Toggle selection
+                    if is_selected:
+                        st.session_state.prefs_selected_notes = [
+                            s for s in selected if s.lower() != note.lower()
+                        ]
+                    else:
+                        st.session_state.prefs_selected_notes = selected + [note]
+                    st.rerun()
+
+    # Custom-note text input — lets user add notes not in the canonical list
+    custom = st.text_input(
+        "Add a custom note",
+        key="prefs_custom_note",
+        placeholder="Type a note not in the list…",
+        label_visibility="collapsed",
+    )
+    if custom.strip() and custom.strip().lower() not in [s.lower() for s in selected]:
+        if st.button(f"+ Add \"{custom.strip()}\"", key="prefs_add_custom"):
+            st.session_state.prefs_selected_notes = selected + [custom.strip()]
+            st.session_state.pop("prefs_custom_note", None)
+            st.rerun()
+
+    # ---- Proof range (design 8c) ----
+    st.html('<div class="mono-kicker-muted" style="padding: 20px 0 4px">PROOF RANGE</div>')
+    st.caption(
+        'Bottles inside this range score higher. "Easy sipper before bed" '
+        "caps out at 105 regardless."
+    )
+
+    pmin_col, pmax_col = st.columns(2)
+    with pmin_col:
+        st.html('<div class="mono-kicker-muted" style="padding: 4px 0">MIN</div>')
+        pmin = st.number_input(
+            "Min proof",
+            min_value=80.0, max_value=160.0,
+            value=float(prefs.preferred_proof_min) if prefs.preferred_proof_min else 90.0,
+            step=1.0,
+            key="prefs_pmin",
+            label_visibility="collapsed",
+        )
+    with pmax_col:
+        st.html('<div class="mono-kicker-muted" style="padding: 4px 0">MAX</div>')
+        pmax = st.number_input(
+            "Max proof",
+            min_value=80.0, max_value=160.0,
+            value=float(prefs.preferred_proof_max) if prefs.preferred_proof_max else 120.0,
+            step=1.0,
+            key="prefs_pmax",
+            label_visibility="collapsed",
+        )
+
+    # ---- Default pour (design 8c) ----
+    st.html('<div class="mono-kicker-muted" style="padding: 20px 0 4px">DEFAULT POUR</div>')
+    st.caption("What the one-tap pour button logs.")
+
+    if "prefs_default_pour" not in st.session_state:
+        current_default = db["users"][current_user].get("preferences", {}).get("default_pour_oz", 1.5)
+        st.session_state.prefs_default_pour = float(current_default)
+
+    pour_options = [0.5, 1.0, 1.5, 2.0]
+    pour_cols = st.columns(4)
+    for i, oz in enumerate(pour_options):
+        is_active = abs(st.session_state.prefs_default_pour - oz) < 0.01
+        with pour_cols[i]:
+            if st.button(
+                f"{oz} oz",
+                key=f"pref_pour_{oz}",
+                type="primary" if is_active else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.prefs_default_pour = oz
+                st.rerun()
+
+    # ---- Save button (top, matching the design's top-right Save) ----
+    # We render it at the top AND at the bottom so it's discoverable both ways.
+    def _save_prefs():
         db["users"][current_user]["preferences"] = {
-            "liked_profiles": [p.strip() for p in profiles_raw.split(",") if p.strip()],
-            "preferred_proof_min": pmin,
-            "preferred_proof_max": pmax,
+            "liked_profiles": list(st.session_state.prefs_selected_notes),
+            "preferred_proof_min": st.session_state.prefs_pmin,
+            "preferred_proof_max": st.session_state.prefs_pmax,
+            "default_pour_oz": st.session_state.prefs_default_pour,
             "favorite_bottles": prefs.favorite_bottles,
         }
         save_db(db)
-        st.success("Saved.")
+        st.toast("Preferences saved.", icon="✅")
+
+    with save_col:
+        st.write("")  # vertical nudge
+        if st.button("Save", key="prefs_save_top", type="primary", use_container_width=True):
+            _save_prefs()
+            st.rerun()
+
+    st.html('<div style="height: 20px"></div>')
+    if st.button("Save preferences", key="prefs_save_bottom", type="primary", use_container_width=True):
+        _save_prefs()
         st.rerun()
 
-    st.divider()
+    # ---- Account section (design 8c) ----
+    st.html('<div style="height: 20px; border-top: 2px solid var(--color-divider); margin-top: 24px"></div>')
+    st.html('<div class="mono-kicker-muted" style="padding: 8px 0 12px">ACCOUNT</div>')
+
+    display = display_name_for(db, current_user)
+    initials = "".join([w[0].upper() for w in display.split()[:2]]) or display[:2].upper()
+    pour_log = get_pour_log(db, current_user)
+    bottle_count = len(inventory)
+    pour_count = len(pour_log)
+
+    st.html(
+        f'<div style="display: flex; align-items: center; gap: 14px; padding: 8px 0 16px">'
+        f'  <div style="'
+        f'    width: 44px; height: 44px; flex: none;'
+        f'    border: 2px solid var(--color-divider-strong);'
+        f'    display: flex; align-items: center; justify-content: center;'
+        f'    font-family: Archivo; font-weight: 800; font-size: 13px;'
+        f'    letter-spacing: 0.06em; color: var(--color-text);'
+        f'  ">{initials}</div>'
+        f'  <div>'
+        f'    <div style="font-family: Archivo; font-weight: 800; font-size: 17px; color: var(--color-text)">{display}</div>'
+        f'    <div style="font-family: JetBrains Mono, ui-monospace, monospace; font-weight: 500; font-size: 10px; letter-spacing: 0.08em; color: var(--color-text-muted); margin-top: 3px; text-transform: uppercase">'
+        f'      {bottle_count} BOTTLES · {pour_count} POURS LOGGED'
+        f'    </div>'
+        f'  </div>'
+        f'</div>'
+    )
+
     with st.expander("Change my password"):
         cp_current = st.text_input("Current password", type="password", key="cp_current")
         cp_new = st.text_input("New password", type="password", key="cp_new")

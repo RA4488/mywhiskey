@@ -2226,10 +2226,9 @@ iframe[title="streamlit_back_camera_input.back_camera_input"] {
 
 _theme_tokens = _DARK_TOKENS if st.session_state.theme_mode == "dark" else _LIGHT_TOKENS
 
-st.markdown(
+st.html(
     '<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">'
-    '<style>' + _theme_tokens + _MODERNIST_RULES + '</style>',
-    unsafe_allow_html=True,
+    '<style>' + _theme_tokens + _MODERNIST_RULES + '</style>'
 )
 
 db = load_db()

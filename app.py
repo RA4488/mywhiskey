@@ -1990,21 +1990,310 @@ def build_bar_reason(detected: Dict, prefs: Preferences, owned: Optional[Bottle]
 
 st.set_page_config(page_title="What Should I Pour?", page_icon="🥃", layout="centered")
 
-# Bigger camera component
-st.markdown("""
+# ---- Theme (Modernist design system) ----
+# Default to light; user can toggle. Persisted in session_state.
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "light"
+
+_IS_DARK = st.session_state.theme_mode == "dark"
+
+# Token definitions — swap the ramp based on theme. The accent is the same
+# in both modes (that's the point of a single-accent system).
+_MODERNIST_CSS_TOKENS = """
+:root {
+    --color-bg: %(bg)s;
+    --color-surface: %(surface)s;
+    --color-text: %(text)s;
+    --color-accent: #ec3013;
+    --color-accent-hover: %(accent_hover)s;
+    --color-accent-active: %(accent_active)s;
+    --color-divider: %(divider)s;
+    --color-muted: %(muted)s;
+
+    --color-accent-100: %(accent_100)s;
+    --color-accent-200: %(accent_200)s;
+    --color-accent-800: #7c1405;
+
+    --font-heading: "Archivo", system-ui, sans-serif;
+    --font-body: "Archivo", system-ui, sans-serif;
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-6: 24px;
+    --space-8: 32px;
+
+    --radius: 0px;
+    --border-2: 2px solid var(--color-divider);
+}
+""" % (
+    {
+        "bg": "#f3f2f2",
+        "surface": "#eae9e9",
+        "text": "#201e1d",
+        "accent_hover": "#dd2b0f",
+        "accent_active": "#ae1800",
+        "divider": "rgba(32, 30, 29, 0.4)",
+        "muted": "rgba(32, 30, 29, 0.55)",
+        "accent_100": "#fff2ef",
+        "accent_200": "#ffe0d9",
+    } if not _IS_DARK else {
+        "bg": "#2d2b2b",
+        "surface": "#444141",
+        "text": "#f8f4f4",
+        "accent_hover": "#ff563c",
+        "accent_active": "#ff9783",
+        "divider": "rgba(248, 244, 244, 0.35)",
+        "muted": "rgba(248, 244, 244, 0.55)",
+        "accent_100": "rgba(236, 48, 19, 0.15)",
+        "accent_200": "rgba(236, 48, 19, 0.25)",
+    }
+)
+
+st.markdown(f"""
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
-    iframe[title="streamlit_back_camera_input.back_camera_input"] {
-        min-height: 520px !important;
-        width: 100% !important;
-    }
-    [data-testid="stCameraInput"] video,
-    [data-testid="stCameraInput"] img {
-        min-height: 480px !important;
-        object-fit: cover !important;
-    }
-    .out-of-stock {
-        opacity: 0.5;
-    }
+{_MODERNIST_CSS_TOKENS}
+
+/* ---------- Ground ---------- */
+html, body, [data-testid="stAppViewContainer"], .stApp {{
+    background: var(--color-bg) !important;
+    color: var(--color-text) !important;
+    font-family: var(--font-body) !important;
+}}
+.main .block-container {{
+    padding-top: 2rem;
+    padding-bottom: 4rem;
+    max-width: 780px;
+}}
+
+/* ---------- Typography ---------- */
+h1, h2, h3, h4, h5, h6, [data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 {{
+    font-family: var(--font-heading) !important;
+    font-weight: 800 !important;
+    line-height: 1.12 !important;
+    letter-spacing: -0.015em !important;
+    color: var(--color-text) !important;
+}}
+h1, [data-testid="stMarkdownContainer"] h1 {{ font-size: 42px !important; }}
+h2, [data-testid="stMarkdownContainer"] h2 {{ font-size: 32px !important; }}
+h3, [data-testid="stMarkdownContainer"] h3 {{ font-size: 25px !important; }}
+h4, [data-testid="stMarkdownContainer"] h4 {{ font-size: 20px !important; }}
+h5, [data-testid="stMarkdownContainer"] h5 {{ font-size: 16px !important; }}
+h6, [data-testid="stMarkdownContainer"] h6 {{
+    font-size: 13px !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+}}
+p, li, span, div, label {{
+    font-family: var(--font-body) !important;
+}}
+[data-testid="stCaptionContainer"], .stCaption {{
+    color: var(--color-muted) !important;
+    font-family: var(--font-body) !important;
+    font-size: 12px !important;
+}}
+a {{ color: var(--color-accent) !important; text-underline-offset: 3px; }}
+
+/* ---------- Buttons: Modernist .btn-primary flush-left ---------- */
+.stButton > button, .stDownloadButton > button, .stLinkButton > a {{
+    background: transparent !important;
+    color: var(--color-text) !important;
+    border: 1px solid var(--color-divider) !important;
+    border-radius: var(--radius) !important;
+    font-family: var(--font-heading) !important;
+    font-weight: 800 !important;
+    font-size: 14px !important;
+    padding: 10px 16px !important;
+    justify-content: flex-start !important;
+    text-align: left !important;
+    transition: background 120ms, border-color 120ms !important;
+    box-shadow: none !important;
+}}
+.stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover {{
+    background: rgba(32, 30, 29, 0.07) !important;
+    border-color: var(--color-text) !important;
+}}
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {{
+    background: var(--color-accent) !important;
+    color: var(--color-bg) !important;
+    border-color: var(--color-accent) !important;
+}}
+.stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {{
+    background: var(--color-accent-hover) !important;
+    border-color: var(--color-accent-hover) !important;
+}}
+.stButton > button[kind="primary"]:active, .stDownloadButton > button[kind="primary"]:active {{
+    background: var(--color-accent-active) !important;
+    border-color: var(--color-accent-active) !important;
+}}
+.stButton > button:focus-visible, .stDownloadButton > button:focus-visible {{
+    outline: 2px solid var(--color-accent) !important;
+    outline-offset: 2px !important;
+}}
+.stButton > button p {{ font-weight: 800 !important; text-align: left !important; }}
+
+/* ---------- Inputs ---------- */
+[data-baseweb="input"] input, [data-baseweb="textarea"] textarea,
+.stTextInput input, .stTextArea textarea, .stNumberInput input {{
+    background: var(--color-surface) !important;
+    color: var(--color-text) !important;
+    border: 1px solid var(--color-divider) !important;
+    border-radius: var(--radius) !important;
+    font-family: var(--font-body) !important;
+    font-size: 14px !important;
+}}
+[data-baseweb="input"] input:focus, [data-baseweb="textarea"] textarea:focus,
+.stTextInput input:focus {{
+    border-color: var(--color-accent) !important;
+    box-shadow: none !important;
+}}
+[data-baseweb="select"] > div {{
+    background: var(--color-surface) !important;
+    border: 1px solid var(--color-divider) !important;
+    border-radius: var(--radius) !important;
+    font-family: var(--font-body) !important;
+}}
+
+/* Labels above inputs */
+[data-testid="stWidgetLabel"] label, [data-testid="stWidgetLabel"] p {{
+    color: var(--color-muted) !important;
+    font-family: var(--font-body) !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+}}
+
+/* ---------- Sliders ---------- */
+[data-baseweb="slider"] [role="slider"] {{
+    background: var(--color-accent) !important;
+    border: 2px solid var(--color-accent) !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+}}
+[data-baseweb="slider"] div[data-testid="stThumbValue"] {{
+    color: var(--color-accent) !important;
+    font-family: var(--font-heading) !important;
+    font-weight: 800 !important;
+}}
+
+/* ---------- Radio & checkbox ---------- */
+[data-baseweb="radio"] [aria-checked="true"] > div:first-child {{
+    background: var(--color-accent) !important;
+    border-color: var(--color-accent) !important;
+}}
+[data-baseweb="checkbox"] [aria-checked="true"] > div:first-child,
+[data-baseweb="checkbox"] [aria-checked="mixed"] > div:first-child {{
+    background: var(--color-accent) !important;
+    border-color: var(--color-accent) !important;
+    border-radius: 0 !important;
+}}
+
+/* ---------- Toggle ---------- */
+[data-baseweb="switch"] [role="switch"][aria-checked="true"] > div:first-child {{
+    background: var(--color-accent) !important;
+}}
+
+/* ---------- Tabs (nav pattern) ---------- */
+.stTabs [data-baseweb="tab-list"] {{
+    gap: 0 !important;
+    border-bottom: 2px solid var(--color-divider) !important;
+}}
+.stTabs [data-baseweb="tab"] {{
+    background: transparent !important;
+    color: var(--color-text) !important;
+    font-family: var(--font-heading) !important;
+    font-weight: 800 !important;
+    font-size: 14px !important;
+    padding: 12px 16px !important;
+    border-radius: 0 !important;
+    border-bottom: 2px solid transparent !important;
+    margin-bottom: -2px !important;
+}}
+.stTabs [data-baseweb="tab"]:hover {{ color: var(--color-accent) !important; }}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{
+    color: var(--color-accent) !important;
+    border-bottom-color: var(--color-accent) !important;
+}}
+.stTabs [data-baseweb="tab-highlight"] {{ display: none !important; }}
+
+/* ---------- Containers with border → Modernist card ---------- */
+[data-testid="stVerticalBlockBorderWrapper"] {{
+    background: var(--color-surface) !important;
+    border: 1px solid var(--color-divider) !important;
+    border-radius: var(--radius) !important;
+    padding: var(--space-3) !important;
+}}
+
+/* ---------- Dividers ---------- */
+hr, [data-testid="stMarkdownContainer"] hr {{
+    border: 0 !important;
+    height: 2px !important;
+    background: var(--color-divider) !important;
+    margin: var(--space-4) 0 !important;
+}}
+
+/* ---------- Alerts / info / success / warning / error ---------- */
+[data-testid="stAlert"] {{
+    border-radius: var(--radius) !important;
+    border-left: 4px solid var(--color-accent) !important;
+    background: var(--color-surface) !important;
+    color: var(--color-text) !important;
+    font-family: var(--font-body) !important;
+}}
+
+/* ---------- Expander ---------- */
+[data-testid="stExpander"] {{
+    border: 1px solid var(--color-divider) !important;
+    border-radius: var(--radius) !important;
+    background: var(--color-surface) !important;
+}}
+[data-testid="stExpander"] summary {{
+    font-family: var(--font-heading) !important;
+    font-weight: 800 !important;
+}}
+
+/* ---------- File uploader ---------- */
+[data-testid="stFileUploaderDropzone"] {{
+    background: var(--color-surface) !important;
+    border: 2px dashed var(--color-divider) !important;
+    border-radius: var(--radius) !important;
+}}
+
+/* ---------- Toast ---------- */
+[data-testid="stToast"] {{
+    background: var(--color-text) !important;
+    color: var(--color-bg) !important;
+    border-radius: var(--radius) !important;
+    font-family: var(--font-body) !important;
+}}
+
+/* ---------- Images: Modernist prints in grayscale ---------- */
+/* Applied selectively via a .grayscale wrapper class; leaves camera preview color. */
+.grayscale img {{ filter: grayscale(1) contrast(1.08); }}
+
+/* ---------- Camera component (functional, not Modernist-styled) ---------- */
+iframe[title="streamlit_back_camera_input.back_camera_input"] {{
+    min-height: 520px !important;
+    width: 100% !important;
+}}
+[data-testid="stCameraInput"] video, [data-testid="stCameraInput"] img {{
+    min-height: 480px !important;
+    object-fit: cover !important;
+}}
+
+/* ---------- Utility classes ---------- */
+.out-of-stock {{ opacity: 0.5; }}
+.card-kicker {{
+    font-size: 10px !important;
+    letter-spacing: 0.1em !important;
+    text-transform: uppercase !important;
+    color: var(--color-accent) !important;
+    font-family: var(--font-heading) !important;
+    font-weight: 800 !important;
+    margin-bottom: 4px !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2188,9 +2477,16 @@ inventory = get_user_bottles(db, current_user)
 prefs = get_user_prefs(db, current_user)
 recent_ids = db["users"][current_user].get("recent_ids", [])
 
-header_col, logout_col = st.columns([4, 1])
+header_col, theme_col, logout_col = st.columns([4, 1, 1])
 header_col.title("🥃 What Should I Pour?")
 header_col.caption(f"Signed in as **{display_name_for(db, current_user)}**")
+
+# Theme toggle
+_theme_label = "☀️ Light" if st.session_state.theme_mode == "dark" else "🌙 Dark"
+if theme_col.button(_theme_label, key="theme_toggle_btn"):
+    st.session_state.theme_mode = "light" if st.session_state.theme_mode == "dark" else "dark"
+    st.rerun()
+
 if logout_col.button("Sign out"):
     # Revoke this device's session token + clear cookie
     _token = st.session_state.get("session_token")

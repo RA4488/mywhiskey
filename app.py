@@ -3997,14 +3997,46 @@ with tab_lookup:
 
 # --- Inventory ---
 with tab_inventory:
-    # ---- Header (design 3a) ----
+    # ---- Header (design 3a) + metrics row ----
     total_bottles = sum(max(0, b.quantity) for b in inventory)
+    sealed_bottles = sum(max(0, b.quantity) for b in inventory if b.sealed)
+    open_bottles = [b for b in inventory if not b.sealed and b.quantity > 0]
+    avg_fill = (
+        sum(b.fill_percent for b in open_bottles) / len(open_bottles)
+        if open_bottles else 0
+    )
+
     st.html(
         f'<div style="padding: 4px 0 2px;">'
         f'  <div class="shelf-header-title">The shelf</div>'
         f'  <div class="shelf-header-count">{total_bottles} OF {len(inventory)}</div>'
         f'</div>'
-        f'<div style="border-bottom: 2px solid var(--color-divider); margin: 6px 0 14px;"></div>'
+    )
+
+    # Metrics row — three JetBrains-Mono stat blocks separated by 2px dividers
+    st.html(
+        f'<div style="'
+        f'  display: grid; grid-template-columns: repeat(3, 1fr);'
+        f'  border-top: 2px solid var(--color-divider);'
+        f'  border-bottom: 2px solid var(--color-divider);'
+        f'  margin: 12px 0 18px;'
+        f'">'
+        f'  <div style="padding: 12px 4px 12px 0; border-right: 2px solid var(--color-divider)">'
+        f'    <div class="mono-kicker-muted">BOTTLES</div>'
+        f'    <div style="font-family: Archivo, sans-serif; font-weight: 800; font-size: 28px; letter-spacing: -0.02em; line-height: 1; margin-top: 6px; color: var(--color-text)">{total_bottles}</div>'
+        f'  </div>'
+        f'  <div style="padding: 12px 4px 12px 14px; border-right: 2px solid var(--color-divider)">'
+        f'    <div class="mono-kicker-muted">SEALED</div>'
+        f'    <div style="font-family: Archivo, sans-serif; font-weight: 800; font-size: 28px; letter-spacing: -0.02em; line-height: 1; margin-top: 6px; color: var(--color-text)">{sealed_bottles}</div>'
+        f'  </div>'
+        f'  <div style="padding: 12px 0 12px 14px">'
+        f'    <div class="mono-kicker-muted">AVG FILL</div>'
+        f'    <div style="font-family: Archivo, sans-serif; font-weight: 800; font-size: 28px; letter-spacing: -0.02em; line-height: 1; margin-top: 6px; color: var(--color-text)">'
+        f'      {f"{avg_fill:.0f}%" if open_bottles else "—"}'
+        f'    </div>'
+        f'    <div class="mono-kicker-muted" style="margin-top: 4px; opacity: 0.7">{len(open_bottles)} OPEN</div>'
+        f'  </div>'
+        f'</div>'
     )
 
     if not inventory:
@@ -5560,3 +5592,4 @@ if tab_admin is not None:
 
         st.divider()
         st.caption(f"Total users: **{len(all_users)}**")
+        

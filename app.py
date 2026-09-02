@@ -2386,6 +2386,75 @@ iframe[title="streamlit_back_camera_input.back_camera_input"] {
     margin: 0 0 14px;
     text-wrap: pretty;
 }
+
+/* Shelf (Inventory) header + toolbar */
+.shelf-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 4px 0 12px;
+    border-bottom: 2px solid var(--color-divider);
+    margin-bottom: 14px;
+}
+.shelf-header-title {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 32px;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+    margin: 0 0 6px;
+}
+.shelf-header-count {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+}
+.shelf-sort-label {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--color-text-muted);
+    padding: 8px 0;
+}
+
+/* Shelf bottle tile (wall view) */
+.shelf-tile {
+    padding-bottom: 12px;
+}
+.shelf-tile-slot {
+    aspect-ratio: 0.7 / 1;
+    background: repeating-linear-gradient(135deg,
+        var(--color-surface-2) 0 5px,
+        var(--color-surface) 5px 10px);
+    border-bottom: 2px solid transparent;
+    margin-bottom: 10px;
+}
+.shelf-tile-slot.running-low {
+    border-bottom-color: var(--color-accent);
+}
+.shelf-tile-slot.out-of-stock {
+    opacity: 0.4;
+}
+.shelf-tile-name {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 700;
+    font-size: 13px;
+    line-height: 1.25;
+    color: var(--color-text);
+    margin: 0 0 3px;
+}
+.shelf-tile-fill {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--color-text-muted);
+}
+.shelf-tile-fill.running-low {
+    color: var(--color-accent);
+}
 """
 
 _theme_tokens = _DARK_TOKENS if st.session_state.theme_mode == "dark" else _LIGHT_TOKENS
@@ -3281,66 +3350,128 @@ with tab_lookup:
 
 # --- Inventory ---
 with tab_inventory:
-    # Add Bottle redirect button
-    if st.button("➕ Add a Bottle", type="primary", use_container_width=True):
-        st.components.v1.html(
-            """
-            <script>
-            (function() {
-                const doc = window.parent.document;
-                const tabButtons = doc.querySelectorAll('button[role="tab"]');
-                for (const btn of tabButtons) {
-                    if (btn.innerText.trim() === 'Add Bottle') {
-                        btn.click();
-                        window.parent.scrollTo({top: 0, behavior: 'smooth'});
-                        break;
-                    }
-                }
-            })();
-            </script>
-            """,
-            height=0,
+    # ---- Header: title + count + Add button (design 3a) ----
+    total_bottles = sum(max(0, b.quantity) for b in inventory)
+    header_col, add_col = st.columns([3, 1])
+    with header_col:
+        st.html(
+            f'<div style="padding: 4px 0 2px;">'
+            f'  <div class="shelf-header-title">The shelf</div>'
+            f'  <div class="shelf-header-count">{total_bottles} OF {len(inventory)}</div>'
+            f'</div>'
         )
+    with add_col:
+        st.write("")  # vertical alignment nudge
+        if st.button("+ Add", type="primary", use_container_width=True, key="inv_add_top"):
+            st.components.v1.html(
+                """
+                <script>
+                (function() {
+                    const doc = window.parent.document;
+                    const tabButtons = doc.querySelectorAll('button[role="tab"]');
+                    for (const btn of tabButtons) {
+                        if (btn.innerText.trim() === 'Add Bottle') {
+                            btn.click();
+                            window.parent.scrollTo({top: 0, behavior: 'smooth'});
+                            break;
+                        }
+                    }
+                })();
+                </script>
+                """,
+                height=0,
+            )
+    st.html('<div style="border-bottom: 2px solid var(--color-divider); margin: 6px 0 14px;"></div>')
 
     if not inventory:
         st.info("No bottles yet.")
     else:
-        # --- Search bar ---
+        # ---- Search ----
         search_query = st.text_input(
-            "🔍 Search",
+            "Search",
             key="inv_search",
-            placeholder="Name, type, notes, pick group… (multiple words supported)",
+            placeholder="Search name, type, note",
             label_visibility="collapsed",
         )
 
-        # --- Sort + view-mode + show-zero on one row ---
+        # ---- Filter chips row (design 3a) ----
+        # Use Streamlit buttons but style active vs inactive via CSS/state.
+        # State lives in session_state.inv_active_filter.
+        if "inv_active_filter" not in st.session_state:
+            st.session_state.inv_active_filter = "All"
+
+        chip_options = ["All", "Open", "Running low", "Sealed", "Private picks"]
+        chip_cols = st.columns(len(chip_options))
+        for i, opt in enumerate(chip_options):
+            is_active = st.session_state.inv_active_filter == opt
+            if chip_cols[i].button(
+                opt,
+                key=f"inv_chip_{opt}",
+                type="primary" if is_active else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.inv_active_filter = opt
+                st.rerun()
+
+        # Map chip choice to the underlying quick_filters list used by
+        # filter_and_sort_bottles (which expects a list of strings).
+        active = st.session_state.inv_active_filter
+        quick_filters: List[str] = []
+        if active == "Open":
+            quick_filters = ["Open only"]
+        elif active == "Running low":
+            quick_filters = ["Running low"]
+        elif active == "Sealed":
+            quick_filters = ["Sealed only"]
+        elif active == "Private picks":
+            quick_filters = ["Private picks"]
+
+        # ---- Sort + WALL/ROWS toggle row (design 3a) ----
         sort_options = [
-            "Name (A–Z)",
             "Recently added",
+            "Name (A–Z)",
             "Fill % (low to high)",
             "Proof (high to low)",
             "Sealed first",
         ]
-        s_col, v_col, z_col = st.columns([2, 1, 1])
-        sort_by = s_col.selectbox("Sort by", sort_options, key="inv_sort")
-        view_mode = v_col.selectbox("View", ["List", "Cards"], key="inv_view")
-        show_zero = z_col.checkbox("Show empties", value=False, key="inv_show_zero")
+        sort_col, wall_col, rows_col = st.columns([3, 1, 1])
+        with sort_col:
+            sort_by = st.selectbox(
+                "Sort",
+                sort_options,
+                key="inv_sort",
+                label_visibility="collapsed",
+            )
 
-        # --- Quick filter chips ---
-        chip_options = ["Sealed only", "Open only", "Running low", "Private picks"]
-        quick_filters = st.multiselect(
-            "Quick filters",
-            chip_options,
-            default=[],
-            key="inv_chips",
-            label_visibility="collapsed",
-            placeholder="Filters: sealed, open, running low, private picks",
-        )
+        if "inv_view_mode" not in st.session_state:
+            st.session_state.inv_view_mode = "Wall"
 
-        # --- Optional grouping ---
-        group_by_type = st.toggle("Group by type", value=False, key="inv_group_type")
+        is_wall = st.session_state.inv_view_mode == "Wall"
+        with wall_col:
+            if st.button(
+                "WALL",
+                key="inv_view_wall",
+                type="primary" if is_wall else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.inv_view_mode = "Wall"
+                st.rerun()
+        with rows_col:
+            if st.button(
+                "ROWS",
+                key="inv_view_rows",
+                type="primary" if not is_wall else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.inv_view_mode = "Rows"
+                st.rerun()
 
-        # --- Apply filters and sort ---
+        # ---- Optional: show empties + group by type (kept from existing) ----
+        opt_col1, opt_col2 = st.columns(2)
+        show_zero = opt_col1.checkbox("Show empties", value=False, key="inv_show_zero")
+        group_by_type = opt_col2.toggle("Group by type", value=False, key="inv_group_type")
+
+        # ---- Apply filters + sort ----
         visible = filter_and_sort_bottles(
             inventory, search_query, sort_by, show_zero, quick_filters
         )
@@ -3348,19 +3479,14 @@ with tab_inventory:
         if not visible:
             st.info("No bottles match your search/filters.")
         else:
-            # --- Pagination state ---
-            PAGE_SIZE = 20
+            # ---- Pagination ----
+            PAGE_SIZE = 20 if not is_wall else 24  # 24 = 8 rows x 3 cols for wall
             if "inv_page_size" not in st.session_state:
                 st.session_state.inv_page_size = PAGE_SIZE
 
-            # Reset page size when filters change
             filter_signature = (
-                search_query,
-                sort_by,
-                view_mode,
-                show_zero,
-                tuple(quick_filters),
-                group_by_type,
+                search_query, sort_by, st.session_state.inv_view_mode,
+                show_zero, active, group_by_type,
             )
             if st.session_state.get("inv_filter_sig") != filter_signature:
                 st.session_state.inv_filter_sig = filter_signature
@@ -3368,30 +3494,30 @@ with tab_inventory:
 
             total = len(visible)
             showing = min(st.session_state.inv_page_size, total)
-            st.caption(f"Showing **{showing}** of **{total}** bottles")
 
-            # --- Render helpers ---
+            # ---- Render helpers ----
 
-            def render_bottle_card(b: Bottle):
-                """Full card layout."""
+            def _render_edit_panel(b: Bottle):
+                """Detail/edit panel shown when a bottle is tapped."""
                 out_of_stock = b.quantity <= 0
                 with st.container(border=True):
                     if out_of_stock:
-                        st.markdown(
-                            f"<div class='out-of-stock'><strong>{b.name}</strong> "
-                            f"<em>(out of stock)</em></div>",
-                            unsafe_allow_html=True,
+                        st.html(
+                            f'<div class="out-of-stock">'
+                            f'  <strong style="font-family:Archivo;font-weight:800">{b.name}</strong>'
+                            f'  <em>(out of stock)</em>'
+                            f'</div>'
                         )
                     else:
-                        title = f"**{b.name}**"
+                        title_html = f'<strong style="font-family:Archivo;font-weight:800;font-size:18px">{b.name}</strong>'
                         if b.private_pick and b.pick_group:
-                            title += f" — _{b.pick_group} pick_"
-                        st.markdown(title)
+                            title_html += f' <span class="mono-kicker" style="margin-left:8px">{b.pick_group.upper()} PICK</span>'
+                        st.html(title_html)
 
                     st.caption(
                         f"{b.type} · {b.proof}° · "
                         f"{'sealed' if b.sealed else 'open'} · "
-                        f"{b.fill_percent:.0f}% full · {b.size_ml} mL"
+                        f"{b.fill_percent:.0f}% full · {b.size_ml} mL · qty {b.quantity}"
                     )
 
                     c1, c2, c3 = st.columns(3)
@@ -3412,7 +3538,7 @@ with tab_inventory:
                         st.caption(f"My notes: {', '.join(b.my_tasting_notes)}")
 
                     if not out_of_stock:
-                        with st.expander("🥃 Log a pour"):
+                        with st.expander("Log a pour"):
                             pour_oz = st.radio(
                                 "Pour size (oz)",
                                 options=[0.5, 1.0, 1.5, 2.0],
@@ -3429,8 +3555,8 @@ with tab_inventory:
                                 )
                                 st.rerun()
 
-                    cols = st.columns(2)
-                    if cols[0].button("Update", key=f"upd_{b.id}"):
+                    action_cols = st.columns(2)
+                    if action_cols[0].button("Update", key=f"upd_{b.id}", type="primary"):
                         for bot in db["users"][current_user]["bottles"]:
                             if bot["id"] == b.id:
                                 bot["quantity"] = int(new_qty)
@@ -3438,29 +3564,65 @@ with tab_inventory:
                                 bot["sealed"] = bool(new_sealed)
                         save_db(db)
                         st.rerun()
-                    if cols[1].button("Remove", key=f"del_{b.id}"):
+                    if action_cols[1].button("Remove", key=f"del_{b.id}"):
                         db["users"][current_user]["bottles"] = [
                             x for x in db["users"][current_user]["bottles"] if x["id"] != b.id
                         ]
                         save_db(db)
                         st.rerun()
 
-            def render_bottle_list_row(b: Bottle):
-                """Compact one-line layout. Tap 'Details' to expand inline."""
+            def _render_wall_tile(b: Bottle, col):
+                """Grid tile: hatched photo slot + name + fill % below.
+                Gold underline if running low. Tap to open detail below."""
                 out_of_stock = b.quantity <= 0
-                line_parts = [f"**{b.name}**"]
-                if b.private_pick and b.pick_group:
-                    line_parts.append(f"_({b.pick_group})_")
-                meta = (
-                    f"{b.type} · {b.proof:.0f}° · {b.fill_percent:.0f}% · "
-                    f"qty {b.quantity} · {'🔒' if b.sealed else '🥃'}"
-                )
+                running_low = 0 < b.fill_percent < 40 and not b.sealed and not out_of_stock
+                fill_class = "running-low" if running_low else ""
+                slot_class = "shelf-tile-slot"
                 if out_of_stock:
-                    meta = f"_(out of stock)_ · {meta}"
+                    slot_class += " out-of-stock"
+                elif running_low:
+                    slot_class += " running-low"
+
+                safe_name = b.name.replace("<", "&lt;").replace(">", "&gt;")
+
+                with col:
+                    st.html(
+                        f'<div class="shelf-tile">'
+                        f'  <div class="{slot_class}"></div>'
+                        f'  <div class="shelf-tile-name">{safe_name}</div>'
+                        f'  <div class="shelf-tile-fill {fill_class}">{b.fill_percent:.0f}%</div>'
+                        f'</div>'
+                    )
+                    is_open = st.session_state.get(f"tile_open_{b.id}", False)
+                    if st.button(
+                        "Hide" if is_open else "Open",
+                        key=f"tile_toggle_{b.id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[f"tile_open_{b.id}"] = not is_open
+                        st.rerun()
+
+            def _render_row(b: Bottle):
+                """Compact one-line layout. Tap Details to expand inline."""
+                out_of_stock = b.quantity <= 0
+                running_low = 0 < b.fill_percent < 40 and not b.sealed and not out_of_stock
+                fill_color = "color: var(--color-accent);" if running_low else "color: var(--color-text-muted);"
+                sealed_indicator = "🔒" if b.sealed else "🥃"
+                pick_html = ""
+                if b.private_pick and b.pick_group:
+                    pick_html = f' <span class="mono-kicker" style="margin-left:8px">{b.pick_group.upper()} PICK</span>'
+                safe_name = b.name.replace("<", "&lt;").replace(">", "&gt;")
 
                 c_main, c_action = st.columns([5, 2])
-                c_main.markdown(" ".join(line_parts))
-                c_main.caption(meta)
+                with c_main:
+                    st.html(
+                        f'<div>'
+                        f'  <div style="font-family:Archivo;font-weight:700;font-size:15px;color:var(--color-text)">{safe_name}{pick_html}</div>'
+                        f'  <div style="font-family:JetBrains Mono,ui-monospace,monospace;font-weight:500;font-size:10px;letter-spacing:.08em;color:var(--color-text-muted);margin-top:2px;text-transform:uppercase">'
+                        f'    {b.type} · {b.proof:.0f}° · <span style="{fill_color}">{b.fill_percent:.0f}%</span> · QTY {b.quantity} {sealed_indicator}'
+                        f'  </div>'
+                        f'</div>'
+                    )
                 is_open = st.session_state.get(f"row_open_{b.id}", False)
                 if c_action.button(
                     "Hide" if is_open else "Details",
@@ -3471,16 +3633,26 @@ with tab_inventory:
                     st.rerun()
 
                 if is_open:
-                    render_bottle_card(b)
+                    _render_edit_panel(b)
 
-            def render_bottle(b: Bottle):
-                if view_mode == "Cards":
-                    render_bottle_card(b)
-                else:
-                    render_bottle_list_row(b)
-
-            # --- Render bottles ---
+            # ---- Render bottles ----
             paged = visible[: st.session_state.inv_page_size]
+
+            def _render_group(bottles: List[Bottle]):
+                if is_wall:
+                    # 3-column grid
+                    for row_start in range(0, len(bottles), 3):
+                        row_bottles = bottles[row_start:row_start + 3]
+                        cols = st.columns(3)
+                        for i, b in enumerate(row_bottles):
+                            _render_wall_tile(b, cols[i])
+                        # Detail panel(s) render full-width below the row
+                        for b in row_bottles:
+                            if st.session_state.get(f"tile_open_{b.id}", False):
+                                _render_edit_panel(b)
+                else:
+                    for b in bottles:
+                        _render_row(b)
 
             if group_by_type:
                 seen_types = []
@@ -3493,14 +3665,17 @@ with tab_inventory:
 
                 for t in seen_types:
                     group = type_to_bottles[t]
-                    with st.expander(f"**{t.title()}** — {len(group)}", expanded=True):
-                        for b in group:
-                            render_bottle(b)
+                    st.html(
+                        f'<div class="mono-kicker" style="margin: 18px 0 8px">'
+                        f'{t.upper()} — {len(group)}'
+                        f'</div>'
+                    )
+                    _render_group(group)
             else:
-                for b in paged:
-                    render_bottle(b)
+                _render_group(paged)
 
-            # --- Pagination footer ---
+            st.caption(f"Showing {showing} of {total}")
+
             if total > st.session_state.inv_page_size:
                 if st.button(
                     f"Show more ({total - st.session_state.inv_page_size} remaining)",

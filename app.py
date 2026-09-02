@@ -1998,29 +1998,47 @@ if "theme_mode" not in st.session_state:
 # on the toggle is a single string swap — no interpolation, nothing to break.
 _LIGHT_TOKENS = """
 :root {
-    --color-bg: #f3f2f2;
-    --color-surface: #eae9e9;
-    --color-text: #201e1d;
-    --color-accent: #ec3013;
-    --color-accent-hover: #dd2b0f;
-    --color-accent-active: #ae1800;
-    --color-divider: rgba(32, 30, 29, 0.4);
-    --color-muted: rgba(32, 30, 29, 0.55);
-    --color-hover-tint: rgba(32, 30, 29, 0.07);
+    --color-bg: #191614;
+    --color-surface: #221e1b;
+    --color-surface-2: #2a2521;
+    --color-text: #f2efec;
+    --color-text-muted: rgba(242, 239, 236, 0.55);
+    --color-text-dim: rgba(242, 239, 236, 0.45);
+    --color-accent: #e8a13c;
+    --color-accent-hover: #d18d2f;
+    --color-accent-active: #b6771f;
+    --color-accent-bg: #191614;
+    --color-divider: rgba(242, 239, 236, 0.2);
+    --color-divider-strong: rgba(242, 239, 236, 0.28);
+    --color-muted: rgba(242, 239, 236, 0.55);
+    --color-hover-tint: rgba(242, 239, 236, 0.06);
+    --color-buy: #5a9a5a;
+    --color-skip: #d64545;
+    --color-accent-tint: rgba(232, 161, 60, 0.14);
+    --color-accent-tint-strong: rgba(232, 161, 60, 0.28);
 }
 """
 
 _DARK_TOKENS = """
 :root {
-    --color-bg: #2d2b2b;
-    --color-surface: #444141;
-    --color-text: #f8f4f4;
-    --color-accent: #ec3013;
-    --color-accent-hover: #ff563c;
-    --color-accent-active: #ff9783;
-    --color-divider: rgba(248, 244, 244, 0.35);
-    --color-muted: rgba(248, 244, 244, 0.55);
-    --color-hover-tint: rgba(248, 244, 244, 0.1);
+    --color-bg: #0f0d0c;
+    --color-surface: #1a1614;
+    --color-surface-2: #221e1b;
+    --color-text: #f2efec;
+    --color-text-muted: rgba(242, 239, 236, 0.55);
+    --color-text-dim: rgba(242, 239, 236, 0.45);
+    --color-accent: #e8a13c;
+    --color-accent-hover: #f0b055;
+    --color-accent-active: #d18d2f;
+    --color-accent-bg: #0f0d0c;
+    --color-divider: rgba(242, 239, 236, 0.16);
+    --color-divider-strong: rgba(242, 239, 236, 0.24);
+    --color-muted: rgba(242, 239, 236, 0.5);
+    --color-hover-tint: rgba(242, 239, 236, 0.06);
+    --color-buy: #5a9a5a;
+    --color-skip: #d64545;
+    --color-accent-tint: rgba(232, 161, 60, 0.12);
+    --color-accent-tint-strong: rgba(232, 161, 60, 0.24);
 }
 """
 
@@ -2078,7 +2096,7 @@ a { color: var(--color-accent) !important; text-underline-offset: 3px; }
 }
 .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {
     background: var(--color-accent) !important;
-    color: #f3f2f2 !important;
+    color: var(--color-accent-bg) !important;
     border-color: var(--color-accent) !important;
 }
 .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {
@@ -2222,12 +2240,158 @@ iframe[title="streamlit_back_camera_input.back_camera_input"] {
 /* Utility */
 .out-of-stock { opacity: 0.5; }
 .grayscale img { filter: grayscale(1) contrast(1.08); }
+
+/* ========================================================
+   Modernist custom-component classes
+   For use in st.html() blocks that rebuild specific surfaces
+   ======================================================== */
+
+/* Mono kicker — the tiny uppercase JetBrains Mono label
+   used everywhere in the design (BEST THREE FOR YOU, NOTES YOU LIKE, etc.) */
+.mono-kicker {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+}
+.mono-kicker-muted {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-text-dim);
+}
+
+/* Rank numeral — the giant 01/02/03 on Recommend cards */
+.rank-numeral {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 40px;
+    line-height: 1;
+    color: rgba(232, 161, 60, 0.85);
+    letter-spacing: -0.04em;
+}
+
+/* Verdict banner — the full-bleed colored band on Look Up */
+.verdict-band {
+    padding: 24px 22px 22px;
+    margin: 16px 0 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.verdict-band-buy { background: var(--color-buy); color: #f2efec; }
+.verdict-band-call { background: var(--color-accent); color: var(--color-accent-bg); }
+.verdict-band-skip { background: var(--color-skip); color: #f2efec; }
+.verdict-band .verdict-label {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 48px;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    text-align: center;
+}
+.verdict-band .verdict-because {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.4;
+    text-align: center;
+    max-width: 320px;
+    margin: 0 auto;
+}
+
+/* Metadata chip — the JetBrains-Mono chips ("35% LEFT", "6D SINCE LAST POUR", etc.) */
+.meta-chip {
+    display: inline-block;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    padding: 4px 8px;
+    border: 1px solid var(--color-divider-strong);
+    color: var(--color-text-muted);
+    margin-right: 6px;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+}
+.meta-chip-amber {
+    background: var(--color-accent-tint);
+    border-color: var(--color-accent-tint-strong);
+    color: var(--color-accent);
+}
+
+/* Bottle placeholder — the diagonal-hatched slot for a bottle photo */
+.bottle-slot {
+    background: repeating-linear-gradient(135deg,
+        var(--color-surface-2) 0 6px,
+        var(--color-surface) 6px 12px);
+    border: 1px solid var(--color-divider);
+    position: relative;
+}
+.bottle-slot-caption {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-weight: 500;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--color-text-dim);
+    text-transform: uppercase;
+    position: absolute;
+    bottom: 8px;
+    left: 12px;
+}
+
+/* Recommend card — full-width card with rank numeral + bottle info */
+.recommend-card {
+    border-bottom: 2px solid var(--color-divider);
+    padding: 0 0 24px;
+    margin-bottom: 12px;
+}
+.recommend-card .card-photo {
+    height: 180px;
+    background: repeating-linear-gradient(135deg,
+        var(--color-surface-2) 0 6px,
+        var(--color-surface) 6px 12px);
+    position: relative;
+    margin-bottom: 16px;
+}
+.recommend-card .card-photo .rank-numeral {
+    position: absolute;
+    top: 14px;
+    left: 18px;
+}
+.recommend-card .card-title {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-weight: 800;
+    font-size: 22px;
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    color: var(--color-text);
+    margin: 0 0 4px;
+}
+.recommend-card .card-sub {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--color-text-muted);
+    margin: 0 0 14px;
+}
+.recommend-card .card-reason {
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--color-text);
+    margin: 0 0 14px;
+    text-wrap: pretty;
+}
 """
 
 _theme_tokens = _DARK_TOKENS if st.session_state.theme_mode == "dark" else _LIGHT_TOKENS
 
 st.html(
-    '<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap" rel="stylesheet">'
+    '<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">'
     '<style>' + _theme_tokens + _MODERNIST_RULES + '</style>'
 )
 
@@ -2615,7 +2779,7 @@ with tab_recommend:
                 last_days_since = days_since_last_pour(pour_log)
                 stashed_reasons = last.get("reasons", {})
 
-                for b in shown:
+                for idx, b in enumerate(shown, start=1):
                     # Use stashed reason if we have one (avoids re-calling AI for
                     # special-occasion personalized text). Otherwise rebuild
                     # programmatically.
@@ -2626,46 +2790,67 @@ with tab_recommend:
                             b, prefs, last["vibe"], recent_ids, affinity,
                             last_days_since.get(b.id),
                         )
-                    with st.container(border=True):
-                        title = f"### {b.name}"
-                        if b.private_pick and b.pick_group:
-                            st.markdown(title)
-                            st.caption(f"_{b.pick_group} pick_")
-                        else:
-                            st.markdown(title)
 
-                        st.caption(
-                            f"{b.type} · {b.proof:.0f}° proof · "
-                            f"{b.fill_percent:.0f}% full · qty {b.quantity}"
+                    # Build the metadata chips (fill %, days since last pour, proof)
+                    _chips = []
+                    _chips.append(f'<span class="meta-chip meta-chip-amber">{b.fill_percent:.0f}% LEFT</span>')
+                    _days = last_days_since.get(b.id)
+                    if _days is not None:
+                        _chips.append(f'<span class="meta-chip">{_days}D SINCE LAST POUR</span>')
+                    if b.proof:
+                        _chips.append(f'<span class="meta-chip">{b.proof:.0f}°</span>')
+                    if b.private_pick and b.pick_group:
+                        _chips.append(f'<span class="meta-chip meta-chip-amber">{b.pick_group.upper()} PICK</span>')
+
+                    _sub_parts = []
+                    if b.type:
+                        _sub_parts.append(b.type.title())
+                    if b.proof:
+                        _sub_parts.append(f"{b.proof:.0f}°")
+                    _sub = " · ".join(_sub_parts)
+
+                    # Escape the reason & name in case they contain HTML-ish chars
+                    _safe_name = b.name.replace("<", "&lt;").replace(">", "&gt;")
+                    _safe_reason = (reason.rstrip(".") + ".").replace("<", "&lt;").replace(">", "&gt;")
+
+                    st.html(
+                        f'<div class="recommend-card">'
+                        f'  <div class="card-photo">'
+                        f'    <span class="rank-numeral">{idx:02d}</span>'
+                        f'  </div>'
+                        f'  <div class="card-title">{_safe_name}</div>'
+                        f'  <div class="card-sub">{_sub}</div>'
+                        f'  <div class="card-reason">{_safe_reason}</div>'
+                        f'  <div>{"".join(_chips)}</div>'
+                        f'</div>'
+                    )
+
+                    # Pour controls — Streamlit widgets sit below the visual card
+                    pour_oz = st.radio(
+                        "Pour size",
+                        options=[0.5, 1.0, 1.5, 2.0],
+                        index=1,
+                        horizontal=True,
+                        key=f"pour_size_{b.id}",
+                        format_func=lambda x: f"{x} oz",
+                        label_visibility="collapsed",
+                    )
+                    if st.button(
+                        f"Pour {pour_oz} oz",
+                        key=f"pour_{b.id}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        log_pour(db, current_user, b.id, pour_oz, vibe=last["vibe"])
+                        st.toast(
+                            f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
+                            icon="🥃",
                         )
+                        st.rerun()
 
-                        st.markdown(f"**Why:** {reason}.")
-
-                        if b.my_tasting_notes:
-                            st.markdown(f"**Your notes:** _{', '.join(b.my_tasting_notes)}_")
-                        if b.world_tasting_notes:
-                            st.caption(f"World's notes: {', '.join(b.world_tasting_notes)}")
-
-                        # Pour controls
-                        pour_oz = st.radio(
-                            "Pour size",
-                            options=[0.5, 1.0, 1.5, 2.0],
-                            index=1,
-                            horizontal=True,
-                            key=f"pour_size_{b.id}",
-                            format_func=lambda x: f"{x} oz",
-                        )
-                        if st.button(
-                            "I poured this 🥃",
-                            key=f"pour_{b.id}",
-                            use_container_width=True,
-                        ):
-                            log_pour(db, current_user, b.id, pour_oz, vibe=last["vibe"])
-                            st.toast(
-                                f"Logged a {pour_oz} oz pour of {b.name}. Cheers.",
-                                icon="🥃",
-                            )
-                            st.rerun()
+                    # Optional: your tasting notes below the pour actions
+                    if b.my_tasting_notes:
+                        st.caption(f"_Your notes: {', '.join(b.my_tasting_notes)}_")
 
 # --- At the Bar ---
 with tab_bar:
@@ -2957,25 +3142,18 @@ with tab_lookup:
             value = value_score_for_lookup(user_price_val, detected)
             verdict = lookup_verdict(fit, value)
 
-            # ---- Verdict banner ----
-            st.markdown(
-                f"""
-                <div style="
-                    border-left: 6px solid {verdict['color']};
-                    background: rgba(0,0,0,0.03);
-                    padding: 14px 18px;
-                    border-radius: 6px;
-                    margin: 16px 0;
-                ">
-                    <div style="font-size:1.6rem; font-weight:700; color:{verdict['color']};">
-                        {verdict['emoji']} {verdict['label']}
-                    </div>
-                    <div style="font-size:1rem; margin-top:4px;">
-                        {verdict['rationale']}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            # ---- Verdict banner (Modernist full-bleed color band) ----
+            _band_class = {
+                "BUY": "verdict-band-buy",
+                "YOUR CALL": "verdict-band-call",
+                "SKIP": "verdict-band-skip",
+            }.get(verdict["label"], "verdict-band-call")
+
+            st.html(
+                f'<div class="verdict-band {_band_class}">'
+                f'<div class="verdict-label">{verdict["label"]}</div>'
+                f'<div class="verdict-because">{verdict["rationale"]}</div>'
+                f'</div>'
             )
 
             # ---- Owned-already callout ----

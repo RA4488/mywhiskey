@@ -1,0 +1,74 @@
+# Bottle Photo Storage Setup
+
+The app can now store bottle photos in Supabase Storage. This is a one-time setup, ~5 minutes.
+
+## What this does
+
+- Bottle photos captured during "Add Bottle" or "Look Up → Save to shelf" get compressed to ~200 KB and uploaded to your Supabase project.
+- The photo URL is stored in the bottle record.
+- Shelf wall tiles and Recommend cards render the photo in grayscale (per the design system).
+- Bottles without photos fall back to the diagonal-hatched placeholder.
+- When you remove a bottle, the app deletes its photo too.
+
+## Prerequisites
+
+You already have Supabase set up. If not, do that first (see main SUPABASE_SETUP.md).
+
+## Step 1: Run the updated schema (~1 min)
+
+The schema file now includes a `photo_url` column on the bottles table. It's idempotent — safe to re-run.
+
+1. In Supabase, click **SQL Editor**
+2. Paste the full contents of `schema.sql`
+3. Click **Run**
+
+You should see "Success. No rows returned." The new column will be added to any existing `bottles` table without touching data.
+
+## Step 2: Create the storage bucket (~3 min)
+
+1. In Supabase, click **Storage** in the left sidebar
+2. Click **New bucket**
+3. Fill in:
+   - **Name:** `bottle-photos` (exactly this, lowercase, hyphenated)
+   - **Public bucket:** ✅ **check the box** — this makes photos readable via URL without authentication
+4. Click **Create bucket**
+
+> **Why a public bucket?** Bottle photos aren't sensitive. Making the bucket public means every friend can see photos on shared shelves without a signed URL negotiation on every render. If you're storing photos of anything sensitive, use a private bucket + signed URLs instead (I can help with that later).
+
+## Step 3: Set the bucket's file size limit (~1 min)
+
+Still in Supabase Storage:
+
+1. Click the `bottle-photos` bucket
+2. Click the settings gear icon (top right)
+3. Under **File size limit**, set it to **1 MB** (the app compresses photos to ~200 KB, so this is a safe upper bound)
+4. Under **Allowed MIME types**, set it to `image/jpeg` (the app always uploads JPEG)
+5. Click **Save**
+
+## Step 4: Deploy the updated app (~1 min)
+
+Push the new `app.py` to your GitHub repo. Streamlit Cloud redeploys automatically.
+
+## Verifying it works
+
+1. Open your app, sign in
+2. Go to **Add Bottle**
+3. Snap or upload a photo, identify it, then hit **Save bottle**
+4. You should see a "Saving photo..." spinner briefly
+5. Go to **Inventory** → the wall view should show your bottle photo in the tile (in grayscale)
+
+If the photo doesn't appear, check the app logs (Manage app → Logs) for "Photo upload failed" messages.
+
+## Storage costs
+
+- Free tier: 1 GB storage + 2 GB egress/month
+- Realistic use: ~200 KB per bottle photo → 5,000 bottles fits comfortably in the free tier
+- If you ever exceed the free tier, Supabase Pro is $25/mo and gives 100 GB storage
+
+## Rolling back
+
+If something goes wrong and you want to disable photo storage:
+1. Delete the `bottle-photos` bucket from Supabase Storage
+2. The app keeps working — every bottle just falls back to the hatched placeholder
+
+The `photo_url` column can stay in the schema (harmless when empty).
